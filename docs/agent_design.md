@@ -1,34 +1,362 @@
 # Agent design
 
-Last updated 2026-05-07.
+Last updated 2026-05-11.
 
-## Current direction
+## Product thesis
 
-The chat agent is a general-use analyst agent inside the Pholio product domain. It is not a general assistant. Its job is to help a retail investor understand their portfolio, stocks they care about, and market context well enough to think better.
+Pholio should become a portfolio-aware signal and decision-support system for retail investors. It is not a general assistant, not a broker, and not a stock-picking oracle.
 
-For v0, the agent is a proof of concept for how far an AI analyst can go with user portfolio data, market data, research context, and bounded computation. We are testing what it can do, where it fails, and what data/tools it needs before splitting work into specialized subagents.
+The product edge should come from automation, memory, personalization, source-grounded research, fast synthesis, and consistent monitoring. The system should help users notice material changes sooner, understand why they matter, and convert them into watchable action plans.
 
-The agent should be read-only. The LLM should plan, call tools, and explain results. It should not inspect long candle arrays directly, perform arithmetic from memory, recommend trades, place orders, or mutate portfolio data.
+The core promise is better trading process, not guaranteed prediction:
 
-The initial product strategy is **portfolio-aware news + fundamentals + trend**. This is not day trading, not pure technical analysis, and not "AI predicts winners." The goal is to turn vibe trading into structured thinking.
+- fewer missed events
+- faster reaction to material changes
+- less emotional buying/selling
+- better risk controls
+- persistent thesis and invalidation tracking
+- clear entry, risk, reward, and data-gap framing.
 
-## Product goal
+The agent system should remain read-only. It can surface facts, risks, tradeoffs, scenarios, watch conditions, alerts, and things worth investigating. It should avoid direct buy/sell/hold instructions, should not place orders, and should not mutate portfolio data.
 
-The agent should help users answer questions like:
+## Target user value
+
+The target user is a busy retail investor who wants easy-to-understand, actionable signals in a noisy market. They may ask:
 
 - What is happening in my portfolio?
 - Why did my portfolio move today or this week?
 - Which holdings are driving gains/losses?
 - Am I concentrated in one stock, sector, factor, or currency exposure?
 - What happened to a specific stock recently?
+- Is TSLA worth buying, and what should I watch before acting?
+- What entry, invalidation, take-profit, or stop-loss levels are worth monitoring?
+- What should I sell, trim, or rebalance?
+- Is this industry/theme worth exposure, and through what instruments?
 - How does this stock look technically, fundamentally, and in recent news?
 - What should I pay attention to before earnings or after a major move?
 - How do two holdings compare?
 - What data is missing before I can make a better judgment?
 
-It should not be a stock picker or robo-advisor. It can surface facts, risks, tradeoffs, scenarios, and things worth investigating. It should avoid "buy/sell/hold" recommendations.
+The best first product shape is not "chatbot that answers stock questions." It is **personal market monitoring + actionable signal cards + user-specific context**. Chat remains the front door, but the system should also support alerts, watches, action plans, reports, and research packets.
 
-## Decision-Support Framework
+## Operating model
+
+The agent system has two layers:
+
+1. Account-level agent
+   - Personal to one user/account.
+   - Uses portfolio, watchlist, memory, preferences, risk context, and past decisions.
+   - Produces personalized chat answers, position reviews, portfolio risk notes, alerts, reports, and action plans.
+
+2. Global research agents later
+   - Shared research over markets, sectors, industries, news, filings, and interesting stocks.
+   - Produce reusable market surveys, sector trend notes, research packets, and candidate ideas.
+   - The account-level agent maps global research to the user's portfolio, watchlist, and preferences.
+
+Implementation can still start with one general chat agent. The architecture should leave room to split repeatable work into specialized subagents once the workflows stabilize.
+
+## User-facing primitives
+
+These primitives should shape both UX and agent outputs:
+
+- Chat answer
+  - Immediate response to a user question, grounded in tools, citations, artifacts, and caveats.
+- Signal card
+  - One actionable market/portfolio item with why it matters, evidence, urgency, and what to watch.
+- Watch item
+  - A condition the user or agent wants monitored.
+- Alert
+  - A concrete threshold or event notification.
+- Action plan
+  - Entry conditions, invalidation, risk level, take-profit watch, stop-loss watch, and follow-up research.
+- Report
+  - Daily/weekly portfolio, watchlist, market, or sector brief.
+- Research packet
+  - Deeper cited analysis for a stock, industry, or theme.
+- Rebalance review
+  - Portfolio-aware sizing and exposure review.
+
+## App-layer entities
+
+These entities are the first durable product structures behind the signal system. They are not all database commitments yet; they define the app concepts, payload shape, and how chat/agents should materialize useful work.
+
+### `Signal`
+
+Core output object. A signal represents something the system thinks may matter to the user's portfolio, watchlist, thesis, or market interests.
+
+Represents:
+
+- buy/add candidate
+- sell/trim review
+- rebalance review
+- new exposure/theme idea
+- risk/stop-loss review
+- take-profit review
+- thesis change
+- portfolio impact
+- data gap.
+
+First-pass shape:
+
+```ts
+type Signal = {
+  id: string
+  userId: string
+  type:
+    | "buy_add"
+    | "sell_trim"
+    | "rebalance"
+    | "new_exposure"
+    | "risk"
+    | "take_profit"
+    | "thesis_change"
+    | "portfolio_impact"
+    | "data_gap"
+  scope: "portfolio" | "ticker" | "theme" | "sector"
+  ticker?: string
+  title: string
+  summary: string
+  whyItMatters: string
+  evidence: unknown[]
+  confidence: "low" | "medium" | "high"
+  urgency: "low" | "medium" | "high"
+  timeHorizon?: "intraday" | "short_term" | "medium_term" | "long_term"
+  portfolioImpact?: unknown
+  suggestedActions: string[]
+  status: "new" | "reviewed" | "saved" | "dismissed" | "resolved"
+  createdAt: string
+  reviewAt?: string
+  expiresAt?: string
+}
+```
+
+System fit:
+
+- Created by chat answers, playbook runs, scheduled scans, or event triggers.
+- Displayed in a signal inbox, portfolio surface, ticker page, or chat follow-up.
+- Can spawn watches, alerts, action plans, thesis updates, or research packets.
+- Should always explain what user decision it supports: buy/add, sell/trim, rebalance, create exposure, set alert, watch, research deeper, or do nothing with a reason.
+
+### `Watch`
+
+A watch tracks a condition before action. It turns a signal or chat answer into something the system can monitor.
+
+First-pass shape:
+
+```ts
+type Watch = {
+  id: string
+  userId: string
+  sourceSignalId?: string
+  ticker?: string
+  scope: "portfolio" | "ticker" | "theme" | "sector"
+  conditionType:
+    | "price"
+    | "percent_move"
+    | "earnings"
+    | "news"
+    | "technical"
+    | "valuation"
+    | "portfolio_weight"
+    | "custom"
+  condition: string
+  threshold?: number
+  direction?: "above" | "below" | "crosses" | "changes"
+  status: "active" | "triggered" | "paused" | "archived"
+  createdAt: string
+  triggeredAt?: string
+}
+```
+
+System fit:
+
+- Created manually by user or suggested by the agent.
+- Evaluated by scheduled jobs or event-driven triggers later.
+- When triggered, creates an alert and can re-run the relevant playbook.
+
+### `Alert`
+
+An alert is a concrete notification that a watch or signal condition fired.
+
+First-pass shape:
+
+```ts
+type Alert = {
+  id: string
+  userId: string
+  watchId?: string
+  signalId?: string
+  title: string
+  message: string
+  severity: "info" | "warning" | "urgent"
+  status: "unread" | "read" | "dismissed"
+  triggeredAt: string
+  deliveredAt?: string
+}
+```
+
+System fit:
+
+- Created when a watch/threshold/event triggers.
+- Should be short and actionable.
+- Links back to the signal, watch, position, or research packet that explains the context.
+
+### `ActionPlan`
+
+An action plan turns an idea into a structured decision plan without executing the trade.
+
+First-pass shape:
+
+```ts
+type ActionPlan = {
+  id: string
+  userId: string
+  sourceSignalId?: string
+  ticker?: string
+  title: string
+  thesis: string
+  entryConditions: string[]
+  invalidationConditions: string[]
+  stopLossWatch?: string
+  takeProfitWatch?: string
+  positionSizingNotes?: string
+  researchNeeded: string[]
+  status: "draft" | "active" | "archived" | "completed"
+  createdAt: string
+  updatedAt: string
+}
+```
+
+System fit:
+
+- Created from Opportunity / Risk Review, stock deep dive, or user chat.
+- Can create watches and alerts for entry, invalidation, stop-loss, and take-profit review.
+- Captures the user's plan so future agents can detect whether conditions changed.
+
+### `Thesis`
+
+A thesis is memory around why the user owns, watches, or cares about a ticker/theme.
+
+First-pass shape:
+
+```ts
+type Thesis = {
+  id: string
+  userId: string
+  ticker?: string
+  theme?: string
+  statement: string
+  status: "active" | "challenged" | "invalidated" | "archived"
+  supportingEvidence: unknown[]
+  contradictingEvidence: unknown[]
+  createdAt: string
+  updatedAt: string
+}
+```
+
+System fit:
+
+- Created or updated from chat, action plans, position reviews, or user edits.
+- Used by the account-level agent to detect thesis conflicts.
+- Should be explicit and editable by the user; it should not be hidden memory.
+
+### `ResearchPacket`
+
+A research packet is a reusable deeper analysis for a stock, industry, sector, market theme, or event.
+
+First-pass shape:
+
+```ts
+type ResearchPacket = {
+  id: string
+  userId?: string
+  scope: "ticker" | "theme" | "sector" | "market"
+  ticker?: string
+  title: string
+  summary: string
+  sources: unknown[]
+  artifacts: unknown[]
+  dataGaps: string[]
+  createdAt: string
+  expiresAt?: string
+}
+```
+
+System fit:
+
+- Created by user request, research playbook, or future global research agents.
+- Can be reused by account-level agents when mapping broad market context to a user's portfolio.
+- Should keep citations and data freshness visible.
+
+### `Report`
+
+A report is a scheduled or manually requested digest.
+
+First-pass shape:
+
+```ts
+type Report = {
+  id: string
+  userId: string
+  type: "daily_brief" | "weekly_review" | "portfolio_review" | "market_survey"
+  title: string
+  summary: string
+  signals: Signal[]
+  openWatches: Watch[]
+  dataGaps: string[]
+  createdAt: string
+}
+```
+
+System fit:
+
+- Created by scheduled jobs or user requests.
+- Bundles signals, alerts, watches, and research into a concise review.
+- Good later surface for proactive account-level agents.
+
+### First implementation order
+
+Start with the entities closest to user action:
+
+1. `Signal`
+2. `Watch`
+3. `ActionPlan`
+4. `Thesis`
+
+Add later when the core loop works:
+
+5. `Alert`
+6. `ResearchPacket`
+7. `Report`
+
+The first pass should let chat create and display these structures manually before adding cron jobs, event triggers, notification delivery, or global research agents.
+
+## First workflow to design
+
+The first workflow should be **Opportunity / Risk Review** because it is close to the user and exercises most system capabilities.
+
+Example user request:
+
+```txt
+Is TSLA worth buying, and when should I watch it?
+```
+
+Expected output:
+
+- current setup
+- bull and bear case
+- technical/fundamental/news context
+- portfolio fit
+- entry watch conditions
+- invalidation or stop-loss watch
+- take-profit watch
+- suggested alerts
+- confidence and data gaps
+- citations and chart/table artifacts where helpful.
+
+This should be actionable without becoming trade execution. The agent should help the user form a plan and monitor conditions.
+
+## Default decision-support framework
 
 Default analysis should follow this medium-term framework:
 
@@ -48,6 +376,164 @@ Default analysis should follow this medium-term framework:
    - Upcoming earnings, unresolved news, key metric, data gap, or follow-up source.
 
 This framework is the first "strategy" of the agent: medium-term monitoring and structured analysis for retail investors who currently trade from vibes, headlines, or incomplete context.
+
+## Signal Factory Model
+
+The agent system should be designed as a signal factory, not only a chat interface with tools.
+
+```txt
+Market / portfolio / user inputs
+        ↓
+Detection layer
+        ↓
+Analysis playbooks
+        ↓
+Signal scoring
+        ↓
+User-facing output
+        ↓
+User action / feedback / memory
+        ↓
+Future personalization
+```
+
+The product edge should come from automation, memory, personalization, source-grounded research, fast synthesis, and consistent monitoring. It should not claim that the model can directly predict market winners. The system should help users notice material changes sooner, understand why they matter, and convert them into watchable action plans.
+
+### Input Streams
+
+The system can receive signals from several sources:
+
+- User-initiated input:
+  - chat questions such as "Is TSLA worth buying and when?"
+  - portfolio review requests
+  - rebalance questions
+  - industry/theme discovery requests
+  - news or price-move questions.
+- Portfolio input:
+  - position P&L moves
+  - portfolio drawdown
+  - concentration drift
+  - sector/currency exposure drift
+  - holding near watch, stop-loss, or take-profit levels
+  - rebalance threshold crossed.
+- Market input:
+  - price move
+  - volume spike
+  - volatility change
+  - trend regime change
+  - sector/index movement
+  - correlation or risk-regime change.
+- Research input:
+  - important news
+  - earnings approaching or released
+  - analyst upgrade/downgrade
+  - price target or recommendation trend change
+  - SEC filing, transcript, or guidance update later
+  - industry trend.
+- Memory input:
+  - event conflicts with user thesis
+  - event matches stated user interest
+  - risk exceeds user preference
+  - watch item reached
+  - previous suggestion worked, failed, or remains unresolved
+  - user repeatedly asks about a ticker/theme.
+
+The detection layer should be mostly deterministic. The LLM should not be the first detector for obvious price, portfolio, threshold, and calendar events. The LLM is more useful after detection: routing, synthesis, caveats, and presentation.
+
+### Signal Types
+
+Playbooks should produce structured signal types:
+
+- Opportunity: something may be worth researching or watching for entry.
+- Risk: something may threaten the portfolio, position, or thesis.
+- Watch: a non-urgent condition worth monitoring.
+- Alert: a threshold or event that should notify the user.
+- Rebalance: portfolio exposure or sizing may need review.
+- Thesis change: new evidence conflicts with or supports a saved thesis.
+- Data gap: important missing/stale/conflicting data blocks stronger analysis.
+- Report: scheduled digest or research packet.
+
+Each signal should eventually have a stable shape:
+
+```txt
+title
+scope: portfolio | ticker | theme | sector
+why it matters
+evidence
+confidence
+urgency
+time horizon
+portfolio impact
+suggested user action
+suggested alerts
+data gaps
+sources
+createdAt
+reviewAt / expiresAt
+```
+
+Signals are not orders. They are structured prompts for the user to review, investigate, set alerts, or update their plan.
+
+### Interaction Layer First
+
+The first design pass should focus on what is closest to the user:
+
+- Chat answer:
+  - answers the immediate question with tools, citations, artifacts, and caveats.
+- Signal card:
+  - shows one actionable market/portfolio item with why it matters and what to watch.
+- Watch item:
+  - tracks a condition the user or agent wants monitored.
+- Alert:
+  - fires when a concrete condition is met.
+- Action plan:
+  - turns an idea into entry conditions, invalidation, risk level, take-profit watch, and follow-up research.
+- Report:
+  - daily/weekly portfolio or market brief.
+- Research packet:
+  - deeper cited analysis for a stock, industry, or theme.
+
+These outputs should connect directly to the portfolio. A useful answer should explain how a signal affects the user's holdings, watchlist, exposure, or stated strategy. For example, "Is TSLA worth buying?" should produce a decision framework:
+
+- current setup
+- bull and bear case
+- technical/fundamental/news context
+- portfolio fit
+- entry watch conditions
+- invalidation or stop-loss watch
+- take-profit watch
+- suggested alerts
+- confidence and data gaps.
+
+This makes the answer actionable without crossing into trade execution or unsupported certainty.
+
+### How Signals Can Improve Outcomes
+
+The system should aim to improve process quality rather than promise prediction:
+
+- fewer missed events
+- faster reaction to material changes
+- less emotional buying/selling
+- better risk controls
+- consistent watchlists and alerts
+- persistent thesis and invalidation tracking
+- less stale or low-quality information
+- earlier discovery of asymmetric setups
+- clearer entry, risk, reward, and data-gap framing.
+
+The durable value is disciplined monitoring and decision support under time pressure.
+
+## Capability and implementation reference
+
+The sections below retain the current detailed design notes for data, tools, SDK, skills, playbooks, code execution, artifacts, and remaining infra work. They should now be read as supporting capabilities for the signal-factory model above:
+
+```txt
+Interaction primitives  -> what users see and act on
+Signals/playbooks       -> how the system turns inputs into decisions
+Agent/subagent layers   -> who owns analysis work
+Tools/SDK/research      -> how data and computation are retrieved
+Infra/hardening         -> how the system becomes reliable enough to trust
+```
 
 ## Initial Data Requirements
 

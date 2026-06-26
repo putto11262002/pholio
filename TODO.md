@@ -1,311 +1,363 @@
 # TODO
 
-## Agent Capability Design
+Local working backlog for the agent design in `docs/agent_design.md`.
+Keep durable product/design decisions in the design doc; keep this file focused on remaining execution work.
 
-Context: the current agent has a working prototype path for portfolio/market tools plus `analysis_run_code`. The next work should expand and stabilize the agent capability shape before deeply hardening the final version.
+## Current State
 
-### Phase 1. Capability Map and Tool Taxonomy
+- Current branch has local commits:
+  - `40acf8c`: inline research citations.
+  - `9598aef`: citation marker hardening.
+  - `research_search_web` and `research_read_page` are wired into the chat agent.
+  - Search uses Tavily when `TAVILY_API_KEY` is configured.
+  - Page read uses `fetch` plus Readability extraction.
+  - Research citation numbers are assigned per assistant response by a shared tool registry.
+  - Inline citation runs like `[1][2]` render as one favicon pill.
+  - Citation pills show a hover card with favicon, title, source/domain, and snippet/excerpt.
+  - Citation parsing skips inline code, fenced code blocks, existing markdown links, and invalid citation ids.
+  - Missing favicons fall back to the source/domain first letter.
+- Generated analysis artifacts first pass is implemented locally:
+  - `analysis_run_code` accepts optional `artifacts`.
+  - Frontend renders artifacts inline where the assistant places `[artifact:<id>]`, with fallback rendering for unreferenced artifacts.
+  - Supported primitive artifact types: `metric_grid`, `table`, `line_chart`, `area_chart`, `bar_chart`, `donut_chart`, `event_timeline`, and `callout`.
+  - The sandbox SDK supports `trademe.output.write(summary, result, artifacts=...)`.
+  - The code-analysis skill and SDK reference document artifact output.
+- Merged PR #52: analysis sandbox SDK hardening, SDK reference generation, skill docs refresh, native chat streaming path, and chat/tool lifecycle logging.
+- `analysis_run_code` uses API-backed data access through the bundled Python SDK instead of preloaded sandbox input files.
+- The sandbox SDK calls `/api/sandbox/*` with a short-lived API token tied to the thread owner user id.
+- Code-analysis skill docs and generated SDK reference are uploaded to both storage buckets:
+  - dev: `trademe-dev`
+  - prod: `trademe`
+- Chat streaming is back on native `result.toUIMessageStreamResponse<ChatMessage>()`.
+- The usage/context-ring UI was removed for now because custom usage streaming caused post-tool hangs.
+- Chat/model hardening currently includes:
+  - total model timeout: 90s
+  - step timeout: 45s
+  - chunk timeout: 30s
+  - `agent.chat.tool_start`, `agent.chat.tool_finish`, `agent.chat.step_finish`, `agent.chat.finish`, `agent.chat.error`, and `agent.chat.abort` logs.
+- Local smoke tests passed:
+  - code written to sandbox
+  - Python executed successfully
+  - `output.json` validated
+  - tool result returned
+  - final assistant response completed after reverting to native stream.
+- SDK smoke findings:
+  - namespace/method coverage passed in app testing.
+  - `market.quote`, `market.candles`, `market.fundamentals`, `news.recent`, `portfolio.summary`, and `portfolio.positions` responded.
+  - `utils.closes` and `utils.returns` behaved correctly on sample data.
+- Current data-quality findings:
+  - candle data can be stale relative to latest quote data; latest observed quote date was 2026-05-08 while one test candle range ended 2025-04-15.
+  - `news.recent("NVDA", 7)` returned 820 items, which likely needs server-side limit/dedupe/date-filter verification.
+  - fundamentals response currently has missing `revenue`, so valuation workflows must treat it as optional.
+  - portfolio SDK works, but current test account has no positions.
 
-- [x] Define the first-pass agent capability map before production hardening.
-- [x] Separate tools into clear classes:
-  - [x] portfolio tools
-  - [x] market-data tools
-  - [ ] analytics/indicator tools
-  - [x] code-execution tools
-  - [ ] research/search tools
-  - [ ] browser tools
-  - [x] future write tools, likely none for v0
-- [x] Document which tools are available to chat now vs. later.
-- [~] Document which tools are allowed inside sandbox code vs. only callable by the agent loop.
-- [x] Define when the agent should use deterministic tools vs. code execution vs. research/browser.
+## Next Items
 
-### Phase 2. Enrich Deterministic Tools
+1. Generated analysis artifacts testing and polish.
+2. Research quality/source-control pass.
+3. SDK testing and data-quality pass.
+4. Sandbox hardening pass.
+5. Tool-call UX and error presentation pass.
+6. Usage/context observability redesign.
+7. Deterministic analytics tools.
+8. Skill/tool observability and evals.
+9. Prompt/policy refinement after tool surface stabilizes.
+10. Agent memory and user context design.
+11. Browser tools as part of research hardening.
+12. Signal factory and interaction-layer design.
 
-- [x] Keep existing tools:
-  - [x] `portfolio_get_summary`
-  - [x] `market_get_quote`
-  - [x] `market_get_company_info`
-  - [x] `news_get_recent`
-  - [x] `analysis_run_code`
-- [ ] Add market-data tools:
-  - [x] `market_get_price_history_summary`
-  - [x] `market_get_fundamentals`
-  - [x] `market_get_earnings`
-  - [x] `market_get_price_target`
-  - [x] `market_get_recommendation_trends`
-  - [x] `market_get_fx_rate`
-- [~] Add portfolio-analysis tools:
-  - [x] `portfolio_get_position_detail`
-  - [x] `portfolio_get_risk_snapshot`
-  - [x] `portfolio_get_allocation`
-  - [ ] `compare_positions`
-- [ ] Add analytics tools:
-  - [ ] `analytics_calculate_technical_indicators`
-  - [ ] `analytics_calculate_returns`
-  - [ ] `calculate_drawdown`
-  - [ ] `calculate_volatility`
-  - [ ] `analytics_calculate_correlation`
-- [ ] Prefer deterministic analytics tools for common requests and reserve code execution for flexible/custom analysis.
+## Signal Factory And Interaction Layer
 
-### Phase 3. Sandbox SDK Shape
+- [x] Reframe the top of `docs/agent_design.md` around product thesis, operating model, user-facing primitives, and the first Opportunity / Risk Review workflow.
+- [ ] Continue restructuring `docs/agent_design.md` around the signal factory model:
+  - input streams
+  - detection layer
+  - playbooks
+  - signal scoring
+  - user-facing outputs
+  - memory/feedback loop.
+- Define first-class user-facing primitives:
+  - signal card
+  - watch item
+  - alert
+  - action plan
+  - report
+  - research packet
+  - rebalance review.
+- [x] Lock first-pass app-layer entities into `docs/agent_design.md`:
+  - `Signal`
+  - `Watch`
+  - `Alert`
+  - `ActionPlan`
+  - `Thesis`
+  - `ResearchPacket`
+  - `Report`
+- Design how each primitive relates to the user's portfolio, watchlist, and stated strategy.
+- Define the first "Opportunity / Risk Review" workflow for user questions like "Is TSLA worth buying and when?"
+- Decide what fields belong in a stable signal shape:
+  - title
+  - scope
+  - why it matters
+  - evidence
+  - confidence
+  - urgency
+  - time horizon
+  - portfolio impact
+  - suggested user action
+  - suggested alerts
+  - data gaps
+  - sources
+  - review/expiry date.
+- Keep signals framed as decision support, not trade execution or guaranteed prediction.
 
-- [ ] Rethink the code-execution contract before hardening.
-- [ ] Decide whether to keep preloaded `input.json`, add lazy SDK calls, or use a hybrid.
-- [~] Replace the current minimal `trademe_sdk.py` with a stable SDK-style interface.
-- [ ] Target shape:
+## Generated Analysis Artifacts
 
-```python
-import trademe_sdk as trademe
+Direction:
+- Treat agent outputs as `answer + artifacts`.
+- Tool outputs may include structured artifacts, but rendering remains app-controlled through known components.
+- The LLM places artifacts in the final answer with `[artifact:<id>]` markers.
+- The LLM should not choose layout, placement, or generate arbitrary frontend UI.
+- Render artifacts inline where valid `[artifact:<id>]` markers appear, not inside the collapsed tool group.
+- If an artifact is not referenced, render it as fallback so it is not lost.
 
-payload = trademe.load_input()
-portfolio = trademe.portfolio.dashboard()
-bars = trademe.market.candles("NVDA")
-metrics = trademe.analytics.technical(bars)
-trademe.output.write({
-    "summary": "...",
-    "metrics": metrics,
-    "warnings": [],
-    "dataGaps": [],
-})
-```
+First pass:
+- [x] Extend `analysis_run_code` output validation to accept optional `artifacts`.
+- [x] Add frontend extraction from completed tool parts.
+- [x] Render artifacts inline in assistant text from `[artifact:<id>]` markers.
+- [x] Support a small schema set:
+  - `metric_grid`
+  - `table`
+  - `line_chart`
+  - `area_chart`
+  - `bar_chart`
+  - `donut_chart`
+  - `event_timeline`
+  - `callout`
+- [x] Cap artifact payloads:
+  - chart points
+  - table rows
+  - total output bytes.
+- [x] Update Python SDK docs/skill guidance so generated code can emit artifacts intentionally.
+- [x] Add prompt rule: if analysis output includes artifacts, place them with `[artifact:<id>]` markers and do not invent ids.
+- [x] Generate SDK reference docs from Python `TypedDict` artifact shapes so enum values and fields are visible to the agent.
+- [x] Upload updated code-analysis skill docs to dev and prod storage.
+- [x] Add `/dev/artifacts` demo route using the same artifact components as chat.
 
-- [~] SDK namespaces:
-  - [x] `trademe.input`
-  - [x] `trademe.portfolio`
-  - [x] `trademe.market`
-  - [x] `trademe.news`
-  - [x] `trademe.output`
-  - [x] `trademe.utils`
-- [ ] Decide per SDK method whether it reads from preloaded `input.json` or lazily calls `/api/sandbox/*`.
-- [ ] Keep generated code focused on orchestration and custom math, not reimplementing core indicators every run.
-- [ ] Add SDK docs and examples.
+Testing and polish:
+- Manual chat test passed for generated metric grid and line chart.
+- Test the expanded primitive set in chat after uploading the refreshed skill docs.
+- Visually review `/dev/artifacts` and tune primitive layouts before treating the artifact contract as stable.
+- Decide whether unreferenced artifact fallback should stay after text.
+- Optimize artifact rendering; current chat rendering can lag when artifacts/charts are present.
+- Revisit artifact placement semantics; inline artifacts currently render before some preceding text in cases where the streaming/render pipeline has not settled.
+- Define cross-boundary artifact refs clearly: tool result ids, assistant text markers, frontend render map, and any future persisted artifact ids should not drift or collide.
 
-Current prototype limitations:
+Later:
+- Add artifacts from deterministic tools such as allocation, risk snapshot, and price history summary.
+- Persist large artifacts or artifact refs if tool output context becomes too large.
+- Add richer chart controls and disclosure for generated data/code.
 
-- [ ] `analysis_run_code` can get stuck pending in local testing.
-- [ ] Agent may make multiple failed tool attempts before recovering.
-- [ ] Debug visibility is weak; no structured analysis run logs yet.
-- [x] Current SDK still includes analysis helpers; latest design direction prefers mostly data access + output contract, with Python libraries handling flexible computation. First cleanup done: SDK now keeps only tiny `closes`/`returns` helpers plus temporary backward-compatible shims.
+## Web Research Tools
 
-### Phase 4. Research/Search Tools
+First pass:
+- [x] Add `research_search_web` for compact current web results.
+- [x] Add `research_read_page` for deterministic readable text extraction from a known URL.
+- [x] Keep web access outside `analysis_run_code`.
+- [x] Use Tavily Search API for search when `TAVILY_API_KEY` is configured.
+- [x] Use plain `fetch` plus deterministic cleanup for page reads.
+- [x] Cap page-read output to avoid context pollution.
+- [x] Add prompt rules requiring citations when research tools are used.
+- [x] Add per-assistant-response citation numbering to research tool outputs.
+- [x] Render inline citation pills from source favicons.
+- [x] Add hover-card source list for inline citations.
+- [x] Harden citation parser so inline code, fenced code blocks, existing markdown links, and invalid ids are not rewritten.
+- [x] Add source/domain first-letter fallback when favicon is missing.
+- [x] Add minimal tool-call UI labels:
+  - searching web
+  - reading page.
 
-- [ ] Decide whether web search belongs in v0 chat or post-v0.
-- [ ] Add research tools separately from code execution.
-- [ ] Candidate tools:
-  - [ ] `research_search_web`
-  - [ ] `research_open_page`
-  - [ ] `search_company_filings`
-  - [ ] `get_recent_market_context`
-  - [ ] `get_cited_sources`
-- [ ] Require citations for web/research answers.
-- [ ] Keep search/browser results out of sandbox unless explicitly needed.
-- [ ] Do not let generated code perform arbitrary web scraping.
-- [ ] Define source priority:
-  - [ ] company investor relations
-  - [ ] SEC filings
-  - [ ] exchange/vendor data
-  - [ ] reputable financial news
-  - [ ] lower-confidence web sources
+Later passes:
+- Manual citation testing completed for:
+  - multiple searches in one assistant turn
+  - duplicate URLs across search/read calls
+  - grouped citations like `[1][2]`
+  - fallback when favicon is missing
+  - inline code and fenced code citation escaping.
+- Improve source hover-card polish if testing reveals layout issues.
+- Add domain/source controls for filings, IR pages, and high-quality financial sources.
+- Add provider fallback or swap if Tavily quality/cost is not good enough.
+- Add optional browser-rendered reader for JS-heavy pages.
+- Add extraction/summarization tool only after basic search/read is stable.
+- Add source quality/ranking rules and UI hints.
+- Keep cross-boundary source refs documented and tested: tool-assigned citation numbers, assistant text markers, frontend source registry, and hover-card rendering should stay per assistant message.
+- Consider a dedicated filings/IR search tool instead of generic web search for SEC and investor-relations work.
 
-### Phase 5. Browser Tools
+## SDK Testing And Data Quality
 
-- [ ] Decide whether browser automation is needed for v0.
-- [ ] Treat browser as a research/acquisition tool, not a computation tool.
-- [ ] Candidate uses:
-  - [ ] inspect company investor-relations pages
-  - [ ] retrieve filings/pages that APIs miss
-  - [ ] verify source pages visually
-  - [ ] test the TradeMe UI
-- [ ] Disallow browser actions that:
-  - [ ] log into broker accounts
-  - [ ] place trades
-  - [ ] submit forms for the user
-  - [ ] bypass paywalls or access controls
-- [ ] Add separate prompt rules for browser use.
+- Add a repeatable SDK smoke-test script or prompt that exercises:
+  - namespace imports
+  - quote
+  - candles
+  - fundamentals
+  - recent news
+  - portfolio summary/positions
+  - output writing.
+- Add SDK/server tests for data shape and max payload size.
+- Add date-window helper or docs so generated code defaults to recent candle windows instead of stale hard-coded ranges.
+- Verify candle vendor recency and date range behavior.
+- Verify `news.recent(days)` actually filters by date.
+- Add server-side `limit` and dedupe for news if needed.
+- Decide whether to populate `fundamentals.revenue` from another vendor field or document it as unavailable.
+- Add one seeded/dev portfolio with positions so portfolio analysis can be tested end to end.
 
-### Phase 6. Agent Prompt and Policy Design
+## Sandbox Hardening
 
-- [ ] Redraft the system prompt around the full tool taxonomy.
-- [ ] Scope the agent to stock, market, portfolio, and investment-analysis questions.
-- [ ] Politely decline unrelated work.
-- [ ] Define tool routing:
-  - [ ] use portfolio tools for user holdings
-  - [ ] use market-data tools for current/static data
-  - [ ] use analytics tools for common calculations
-  - [ ] use code execution for custom/multi-step numerical analysis
-  - [ ] use research/search/browser for external context requiring citations
-- [ ] Explicitly disallow:
-  - [ ] buy/sell/hold instructions
-  - [ ] trade execution
-  - [ ] neural-net/model training unless we explicitly support it later
-  - [ ] open-ended compute tasks
-  - [ ] unrelated coding/helpdesk tasks
+- Investigate and upgrade the Cloudflare Sandbox / Agent DO infrastructure libraries:
+  - current packages include `@cloudflare/sandbox@0.9.3`, `agents@0.12.3`, and `@cloudflare/ai-chat@0.6.2`.
+  - confirm whether observed tool-call hangs relate to older Sandbox/Agent DO behavior.
+  - migrate to the current recommended Cloudflare Sandbox/Agents SDK path if APIs have changed.
+  - retest code execution startup, exec completion, tool result streaming, and UI completion after migration.
+- Add static code screening for obvious unsafe or out-of-scope patterns:
+  - `subprocess`
+  - `os.system`
+  - `socket`
+  - arbitrary network clients such as `requests`, `urllib`, `http.client`
+  - `pip` or package installation
+  - direct environment inspection such as `os.environ`
+  - sensitive filesystem reads.
+- Return clear recoverable tool errors when generated code is rejected.
+- Document that static screening is defense-in-depth, not the primary sandbox boundary.
+- Normalize or reject `NaN`, `Infinity`, and unserializable values in `result`.
+- Decide whether code execution timeout should stay at 15s or increase slightly for first-run cold starts.
+- Split timeout/error labels more clearly:
+  - sandbox startup
+  - sandbox file write
+  - Python execution
+  - output read/validation.
+- Improve user-safe error presentation in chat UI; avoid raw stack traces or overly internal details.
+- Add persistent audit/log sink later:
+  - run id
+  - user id
+  - task
+  - generated code
+  - execution metadata
+  - output summary
+  - error class/message.
+- Keep DB schema changes for audit persistence isolated in their own PR.
 
-### Phase 7. UX for Tool Calls
+## Tool Call UX
 
-- [ ] Improve visible tool-call states:
-  - [ ] fetching portfolio
-  - [ ] fetching market data
-  - [ ] running technical analysis
-  - [ ] searching web
-  - [ ] browsing source
-  - [ ] completed/failed
-- [ ] Consider richer cards for:
-  - [ ] analysis result
-  - [ ] sources/citations
-  - [ ] code used
-  - [ ] data gaps
-- [ ] Decide whether generated code should be shown by default or hidden behind a disclosure.
+- Improve visible tool-call states:
+  - fetching portfolio
+  - fetching market data
+  - running technical analysis
+  - searching web
+  - browsing source
+  - completed/failed.
+- Show concise tool summaries from `analysis_run_code.summary`.
+- Consider richer cards for:
+  - analysis result
+  - sources/citations
+  - code used
+  - data gaps.
+- Decide whether generated code should be shown by default or hidden behind disclosure.
+- Add user-safe display for recoverable analysis errors.
 
-### Phase 8. Production Hardening
+## Usage And Context Observability
 
-This comes after the capability shape is closer to final. Keep basic safety rails during exploration, then harden the final toolset.
+- Do not reintroduce custom live stream wrapping until the post-tool hang is fully understood.
+- Keep backend usage persistence via `insertAiRun`.
+- Rebuild context usage UI from persisted run metadata or a separate post-turn fetch instead of injecting usage into the live message stream.
+- Later verify context display against real provider usage for multi-step tool runs.
 
-Sections below track the hardening work.
+## Agent Memory And User Context
 
----
+- Design long-term memory as explicit product state, not hidden model memory.
+- Track durable user context that can improve analysis:
+  - user profile and investing context
+  - stated goals, time horizon, risk preference, and constraints
+  - strategy/thesis notes and whether they worked over time
+  - watchlist and recurring interests
+  - environment context such as current market regime, data freshness, known vendor gaps, and active data-source limitations
+  - user preferences for depth, formatting, charts, citations, and risk framing.
+- Define memory boundaries:
+  - what the agent may remember automatically
+  - what requires explicit user confirmation
+  - what can be edited/deleted by the user
+  - what should stay session-only.
+- Add memory retrieval rules to the future system prompt only after storage, consent, and UI controls are designed.
+- Keep this separate from trading advice; memory should improve context and continuity, not turn the agent into an autonomous decision maker.
 
-## Agent Code Execution Hardening
+## Deterministic Analytics Tools
 
-Context: `analysis_run_code` is wired as a prototype code execution environment for stock and portfolio analysis. Before shipping, treat this as an untrusted-code feature and close the gaps below.
+- Add pure analytics functions under `src/analytics/`.
+- Candidate functions:
+  - returns
+  - SMA/EMA
+  - RSI
+  - volatility
+  - max drawdown
+  - correlation
+  - ticker comparison helpers.
+- Candidate tools:
+  - `analytics_calculate_technical_indicators`
+  - `analytics_calculate_returns`
+  - `analytics_calculate_drawdown`
+  - `analytics_calculate_volatility`
+  - `analytics_calculate_correlation`
+  - `compare_positions`.
+- Prefer deterministic analytics tools for common repeatable requests.
+- Reserve code execution for custom or multi-step numerical analysis.
 
-### 1. Observability and Run IDs
+## Skill Registry And Skills
 
-- [ ] Generate a stable `analysisRunId` for every `analysis_run_code` call.
-- [ ] Log structured events:
-  - [ ] run started
-  - [ ] dataset fetch started/completed
-  - [ ] sandbox file writes completed
-  - [ ] code execution completed/failed/timed out
-  - [ ] output parse completed/failed
-- [ ] Include fields:
-  - [ ] `analysisRunId`
-  - [ ] user id or mock user id
-  - [ ] chat/agent session id if available
-  - [ ] model key if available
-  - [ ] tickers
-  - [ ] candle range
-  - [ ] requested data scopes
-  - [ ] code length
-  - [ ] duration
-  - [ ] success/error
-  - [ ] output size
-- [ ] Make logs useful in local dev and Cloudflare observability.
+- Add skill registry observability:
+  - `skill_list`
+  - `skill_load`
+  - `skill_read_file`
+  - skill name, file path, content bytes, checksum, and status.
+- Add skill selection/evaluation tests:
+  - model loads `code-analysis-env` before `analysis_run_code` for candle/calculation prompts.
+  - model does not load code-analysis skill for simple quote/news questions.
+  - model reads `references/sdk.md` only when writing Python code.
+- Decide Worker cache policy for R2 skill manifest/file reads.
+- Keep `skill_execute_script` out of scope until sandbox policy, logging, and evals are stronger.
 
-### 2. Prompt Scope
+## Agent Prompt And Policy
 
-- [ ] Tighten the system prompt so code execution is only for stock, market, portfolio, and investment-analysis tasks.
-- [ ] Explicitly allow:
-  - [ ] returns
-  - [ ] SMA/EMA/RSI/MACD-style indicators
-  - [ ] drawdown
-  - [ ] volatility
-  - [ ] portfolio concentration
-  - [ ] correlations/comparisons
-  - [ ] simple scenario calculations
-- [ ] Explicitly disallow:
-  - [ ] training ML/neural-net models
-  - [ ] package installation
-  - [ ] web scraping
-  - [ ] filesystem exploration
-  - [ ] network calls
-  - [ ] crypto mining/benchmarks
-  - [ ] trading/order execution
-  - [ ] accessing secrets or environment variables
-- [ ] Ensure unrelated user requests are politely declined.
+- Redraft the system prompt around the full tool taxonomy once tool shape stabilizes.
+- Scope the agent to stock, market, portfolio, and investment-analysis questions.
+- Politely decline unrelated work.
+- Define routing:
+  - portfolio tools for user holdings
+  - market-data tools for current/static data
+  - analytics tools for common calculations
+  - code execution for custom/multi-step numerical analysis
+  - research/search/browser for external context requiring citations.
+- Explicitly disallow:
+  - buy/sell/hold instructions
+  - trade execution
+  - neural-net/model training unless explicitly supported later
+  - open-ended compute tasks
+  - unrelated coding/helpdesk tasks.
 
-### 3. Backend Guardrails
+## Research And Browser Tools
 
-- [ ] Enforce max code length.
-- [ ] Enforce max tickers per run.
-- [ ] Enforce max candle range.
-- [ ] Enforce max total candle rows.
-- [ ] Enforce max stdout/stderr length.
-- [ ] Enforce max output file size.
-- [ ] Keep execution timeout strict:
-  - [ ] normal target: 5-10 seconds
-  - [ ] hard max: 15 seconds
-- [ ] Ensure no background processes are started by the tool.
-- [ ] Limit repair/retry behavior to one attempt at most.
-
-### 4. Static Code Screening
-
-- [ ] Add a pre-execution code scanner for obvious unsafe or out-of-scope patterns.
-- [ ] Block or reject:
-  - [ ] `subprocess`
-  - [ ] `os.system`
-  - [ ] `socket`
-  - [ ] `requests`
-  - [ ] `urllib`
-  - [ ] `http.client`
-  - [ ] `pip`
-  - [ ] `open("/etc`
-  - [ ] environment access such as `os.environ`
-  - [ ] shell execution
-- [ ] Return a clear tool error when code is rejected.
-- [ ] Document that this is defense-in-depth, not the primary sandbox boundary.
-
-### 5. Output Contract
-
-- [x] Require `output.json` to match a strict schema:
-
-```ts
-type AnalysisOutput = {
-  summary: string
-  result: unknown
-}
-```
-
-- [x] Reject oversized outputs.
-- [x] Reject non-JSON outputs.
-- [ ] Normalize `NaN`, `Infinity`, and unserializable values.
-- [ ] Preserve enough error detail for debugging without leaking internals to the user.
-
-### 6. Data Access Model
-
-- [ ] Keep the current preloaded `input.json` path for small/medium analyses.
-- [ ] Decide whether/when to add lazy sandbox SDK calls to `/api/sandbox/*`.
-- [ ] If adding lazy calls:
-  - [ ] replace static `SANDBOX_API_TOKEN` with short-lived signed run tokens
-  - [ ] bind token to user id
-  - [ ] bind token to `analysisRunId`
-  - [ ] bind token to allowed tickers/scopes/ranges
-  - [ ] expire token after a few minutes
-- [ ] Avoid exposing normal app session cookies to sandbox code.
-
-### 7. Audit Persistence
-
-- [ ] Add a persistent audit table or log sink for analysis runs.
-- [ ] Store:
-  - [ ] run id
-  - [ ] user id
-  - [ ] task
-  - [ ] dataset request
-  - [ ] generated code
-  - [ ] execution metadata
-  - [ ] output schema summary
-  - [ ] error class/message
-- [ ] Decide retention policy before production.
-- [ ] Keep DB schema changes isolated in their own PR per repo rules.
-
-### 8. UI/UX
-
-- [ ] Show clear tool-call state:
-  - [ ] preparing dataset
-  - [ ] running analysis
-  - [ ] completed
-  - [ ] failed/timed out
-- [ ] Consider showing a collapsible "code used" panel after execution.
-- [ ] Show user-safe errors when the analysis fails.
-- [ ] Avoid exposing raw stack traces in the chat UI.
-
-### 9. Docs and Operating Notes
-
-- [ ] Expand `docs/agent_design.md` with:
-  - [ ] architecture diagram
-  - [ ] allowed/disallowed analysis examples
-  - [ ] local testing steps
-  - [ ] deployment requirements for Cloudflare Containers/Sandbox
-  - [ ] security model and limitations
-- [ ] Add a checklist for reviewing future code-execution changes.
-- [ ] Document that prompt rules are not security boundaries.
+- Decide whether web search belongs in v0 chat or post-v0.
+- Add research tools separately from code execution.
+- Candidate tools:
+  - `research_search_web`
+  - `research_open_page`
+  - `search_company_filings`
+  - `get_recent_market_context`
+  - `get_cited_sources`.
+- Require citations for web/research answers.
+- Keep search/browser results out of sandbox unless explicitly needed.
+- Do not let generated code perform arbitrary web scraping.
+- Treat browser tools as part of web research hardening:
+  - use them when fetch/readability cannot access or interpret a JS-heavy page
+  - use them to verify source pages visually when needed
+  - keep browser outputs cited and compact
+  - avoid polluting model context with raw page dumps.
+- Browser tools should be research/acquisition tools only.
+- Disallow broker login, trade placement, user form submission, and paywall/access-control bypass.
