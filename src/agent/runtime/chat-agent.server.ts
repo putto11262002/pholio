@@ -1,5 +1,6 @@
 import { AIChatAgent } from "@cloudflare/ai-chat"
-import type { StreamTextOnFinishCallback, ToolSet } from "ai"
+import { createUIMessageStreamResponse, toUIMessageStream } from "ai"
+import type { GenerateTextOnEndCallback, ToolSet } from "ai"
 import type { OnChatMessageOptions } from "@cloudflare/ai-chat"
 import { verifyToken } from "@clerk/backend"
 import type { ChatMessage } from "@/agent/chat-message"
@@ -14,20 +15,25 @@ export class ChatAgent extends AIChatAgent<Env> {
     return userId
   }
 
-  async onChatMessage(onFinish: StreamTextOnFinishCallback<ToolSet>, options?: OnChatMessageOptions) {
+  async onChatMessage(onEnd: GenerateTextOnEndCallback<ToolSet>, options?: OnChatMessageOptions) {
     const modelKey = options?.body?.modelKey as GeneralChatModelKey | undefined
     const userId = await this.getThreadUserId()
     const threadId = this.name
 
     const result = await runChatAgent({
       messages: this.messages as ChatMessage[],
-      onFinish,
+      onEnd,
       userId,
       threadId,
       modelKey,
     })
 
-    return result.toUIMessageStreamResponse<ChatMessage>({ sendReasoning: true })
+    return createUIMessageStreamResponse({
+      stream: toUIMessageStream({
+        stream: result.stream,
+        sendReasoning: true,
+      }),
+    })
   }
 
   async onRequest(request: Request): Promise<Response> {

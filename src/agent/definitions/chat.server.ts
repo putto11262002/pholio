@@ -1,5 +1,5 @@
-import { streamText, convertToModelMessages, stepCountIs } from "ai"
-import type { StreamTextOnFinishCallback, ToolSet } from "ai"
+import { streamText, convertToModelMessages, isStepCount } from "ai"
+import type { GenerateTextOnEndCallback, StreamTextOnEndCallback, ToolSet } from "ai"
 import type { ChatMessage } from "@/agent/chat-message"
 import { createModel } from "@/agent/gateway.server"
 import { generalChatModels, resolveGeneralChatModelKey, type GeneralChatModelKey } from "@/agent/general-chat-models"
@@ -69,13 +69,13 @@ function renderSystemPrompt(skills: AgentSkillMetadata[]): string {
 
 export async function runChatAgent({
   messages,
-  onFinish,
+  onEnd,
   userId,
   threadId,
   modelKey: modelKeyOpt,
 }: {
   messages: ChatMessage[]
-  onFinish: StreamTextOnFinishCallback<ToolSet>
+  onEnd: GenerateTextOnEndCallback<ToolSet>
   userId: string
   threadId: string | null
   modelKey?: GeneralChatModelKey
@@ -93,14 +93,14 @@ export async function runChatAgent({
   const researchTools = createResearchTools()
   const startedAt = Date.now()
 
-  const wrappedOnFinish: StreamTextOnFinishCallback<ToolSet> = async (event) => {
+  const wrappedOnEnd: StreamTextOnEndCallback<ToolSet> = async (event) => {
     console.info(JSON.stringify({
       event: "agent.chat.finish",
       threadId,
       stepCount: event.steps.length,
       finishReason: event.finishReason,
-      inputTokens: event.totalUsage.inputTokens ?? 0,
-      outputTokens: event.totalUsage.outputTokens ?? 0,
+      inputTokens: event.usage.inputTokens ?? 0,
+      outputTokens: event.usage.outputTokens ?? 0,
       toolsUsed: Array.from(new Set(event.steps.flatMap((step) => step.toolCalls.map((tc) => tc.toolName)))),
     }))
     try {
@@ -112,12 +112,12 @@ export async function runChatAgent({
         error: err instanceof Error ? err.message : String(err),
       }))
     }
-    await onFinish(event)
+    await onEnd(event)
   }
 
   return streamText({
     model: createModel(modelId),
-    system: renderSystemPrompt(skills),
+    instructions: renderSystemPrompt(skills),
     tools: {
       ...skillTools,
       ...createPortfolioTools(userId),
@@ -126,7 +126,7 @@ export async function runChatAgent({
       ...createAnalysisTools(userId),
     },
     messages: modelMessages,
-    stopWhen: [stopOnTerminalToolError, stepCountIs(10)],
+    stopWhen: [stopOnTerminalToolError, isStepCount(10)],
     timeout: {
       totalMs: CHAT_TOTAL_TIMEOUT_MS,
       stepMs: CHAT_STEP_TIMEOUT_MS,
@@ -146,7 +146,7 @@ export async function runChatAgent({
         steps: event.steps.length,
       }))
     },
-    experimental_onToolCallStart: (event) => {
+    onToolExecutionStart: (event) => {
       console.info(JSON.stringify({
         event: "agent.chat.tool_start",
         threadId,
@@ -154,19 +154,23 @@ export async function runChatAgent({
         toolCallId: event.toolCall.toolCallId,
       }))
     },
-    experimental_onToolCallFinish: (event) => {
+    onToolExecutionEnd: (event) => {
+      const success = event.toolOutput.type === "tool-result"
+      const output = success ? event.toolOutput.output : undefined
+      const error = success ? undefined : event.toolOutput.error
+      const outputJson = output === undefined ? undefined : JSON.stringify(output)
       console.info(JSON.stringify({
         event: "agent.chat.tool_finish",
         threadId,
         toolName: event.toolCall.toolName,
         toolCallId: event.toolCall.toolCallId,
-        success: event.success,
-        durationMs: event.durationMs,
-        outputBytes: event.success ? new TextEncoder().encode(JSON.stringify(event.output)).byteLength : undefined,
-        error: event.success ? undefined : event.error instanceof Error ? event.error.message : String(event.error),
+        success,
+        durationMs: event.toolExecutionMs,
+        outputBytes: outputJson === undefined ? undefined : new TextEncoder().encode(outputJson).byteLength,
+        error: error === undefined ? undefined : error instanceof Error ? error.message : String(error),
       }))
     },
-    onStepFinish: (event) => {
+    onStepEnd: (event) => {
       console.info(JSON.stringify({
         event: "agent.chat.step_finish",
         threadId,
@@ -175,6 +179,6 @@ export async function runChatAgent({
         toolResults: event.toolResults.map((toolResult) => toolResult.toolName),
       }))
     },
-    onFinish: wrappedOnFinish,
+    onEnd: wrappedOnEnd,
   })
 }

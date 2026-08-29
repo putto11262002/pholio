@@ -1,5 +1,5 @@
 import { and, count, desc, gte, eq, sql, sum } from "drizzle-orm"
-import type { OnFinishEvent, ToolSet } from "ai"
+import type { GenerateTextEndEvent, ToolSet } from "ai"
 import { getDb } from "@/db/index.server"
 import { aiRun } from "@/db/schema"
 import { computeCostUsd } from "./pricing"
@@ -145,13 +145,13 @@ export function buildAiRun({
   type,
   startedAt,
 }: {
-  event: OnFinishEvent<ToolSet>
+  event: GenerateTextEndEvent<ToolSet>
   userId: string
   threadId: string | null
   type: AiRunType
   startedAt: number
 }): NewAiRun {
-  const usage = event.totalUsage
+  const usage = event.usage
   const inputDetails = usage.inputTokenDetails ?? {}
   const outputDetails = usage.outputTokenDetails ?? {}
 

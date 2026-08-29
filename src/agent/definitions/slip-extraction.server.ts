@@ -1,4 +1,4 @@
-import { NoObjectGeneratedError, generateObject } from "ai"
+import { NoObjectGeneratedError, Output, generateText } from "ai"
 import { createModel } from "@/agent/gateway.server"
 import { slipExtractionSchema, type SlipExtraction } from "@/slip/schemas"
 
@@ -39,21 +39,21 @@ export async function runSlipExtraction(input: {
   contentType: string
 }): Promise<{ result: SlipExtraction; modelId: string }> {
   try {
-    const { object } = await generateObject({
+    const { output } = await generateText({
       model: createModel(EXTRACTION_MODEL_ID),
-      schema: slipExtractionSchema,
-      system: SYSTEM_PROMPT,
+      output: Output.object({ schema: slipExtractionSchema }),
+      instructions: SYSTEM_PROMPT,
       messages: [
         {
           role: "user",
           content: [
             { type: "text", text: "Parse this image per your instructions." },
-            { type: "image", image: input.image, mediaType: input.contentType },
+            { type: "file", data: input.image, mediaType: input.contentType },
           ],
         },
       ],
     })
-    return { result: object, modelId: EXTRACTION_MODEL_ID }
+    return { result: output, modelId: EXTRACTION_MODEL_ID }
   } catch (err) {
     if (NoObjectGeneratedError.isInstance(err)) {
       const detail = {
