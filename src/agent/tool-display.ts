@@ -4,6 +4,20 @@ export type ToolDisplay = {
   resultMessage: (output: unknown) => string
 }
 
+export function isNormalizedToolFailure(output: unknown): output is { success: false; message: string } {
+  return typeof output === "object"
+    && output !== null
+    && "success" in output
+    && output.success === false
+    && "message" in output
+    && typeof output.message === "string"
+}
+
+export function toolResultMessage(display: ToolDisplay | undefined, output: unknown): string | null {
+  if (isNormalizedToolFailure(output)) return output.message || "Tool failed"
+  return display ? display.resultMessage(output) : null
+}
+
 type Portfolio = { summary: { positionCount: number; totalValueUSD: number }; positions: unknown[] }
 type Allocation = { byTicker: unknown[]; bySector: unknown[] }
 type RiskSnapshot = { positionCount: number; topPositionWeightPct: number; top3WeightPct: number }
