@@ -18,12 +18,12 @@ TAVILY_API_KEY=
 
 # Auth — Clerk dev instance (https://dashboard.clerk.com → API Keys)
 CLERK_SECRET_KEY=sk_test_
-# Clerk webhook signing secret — create webhook pointing at https://trademe-dev.sabaiscale.com/api/webhooks/clerk (dev) or https://pholio.markets/api/webhooks/clerk (prod)
+# Clerk webhook signing secret — create webhook pointing at https://pholio-dev.sabaiscale.com/api/webhooks/clerk (dev) or https://pholio.markets/api/webhooks/clerk (prod)
 # Events: user.created, user.updated, user.deleted
 CLERK_WEBHOOK_SECRET=whsec_
 
-# CF Dev Tunnel — Cloudflare Zero Trust → Networks → Tunnels → trademe-dev → token
-# Used by pnpm dev:tunnel (routes trademe-dev.sabaiscale.com → localhost:5173)
+# CF Dev Tunnel — Cloudflare Zero Trust → Networks → Tunnels → pholio-dev → token
+# Used by pnpm dev:tunnel (routes pholio-dev.sabaiscale.com → localhost:5173)
 CF_DEV_TUNNEL_TOKEN=
 
 # Internal API token signing secret — used to issue short-lived user-scoped tokens
@@ -32,5 +32,5 @@ API_TOKEN_SECRET=
 
 # Sandbox SDK callback origin. The analysis container calls this URL.
 # Docker Desktop local default: http://host.docker.internal:3000
-# Tunnel/dev-domain alternative: https://trademe-dev.sabaiscale.com
+# Tunnel/dev-domain alternative: https://pholio-dev.sabaiscale.com
 PHOLIO_API_BASE_URL=http://host.docker.internal:3000
