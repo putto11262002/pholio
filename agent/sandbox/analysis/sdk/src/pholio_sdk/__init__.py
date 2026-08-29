@@ -30,6 +30,16 @@ class SectorAllocation(TypedDict):
     pct: float
 
 
+def _json_default(value: Any) -> Any:
+    """Normalize common analysis scalar objects and reject unknown objects."""
+
+    if hasattr(value, "item") and callable(value.item):
+        return value.item()
+    if hasattr(value, "isoformat") and callable(value.isoformat):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 class PortfolioSummary(TypedDict):
     """High-level portfolio totals in USD."""
 
@@ -361,7 +371,7 @@ class Output:
             summary: One short non-empty sentence describing what was done.
             result: Compact JSON-serializable analysis result. Prefer a dict
                 with metrics, warnings, and data gaps. Do not return raw
-                candles, full news lists, plots, or large tables.
+                candles, full news lists, plots, large tables, NaN, or Infinity.
             artifacts: Optional UI artifacts such as metric grids, line charts,
                 or tables. Keep payloads compact and downsample chart data.
         """
@@ -374,7 +384,7 @@ class Output:
         }
         if artifacts is not None:
             payload["artifacts"] = artifacts
-        OUTPUT_PATH.write_text(json.dumps(payload, default=str, ensure_ascii=False))
+        OUTPUT_PATH.write_text(json.dumps(payload, default=_json_default, ensure_ascii=False, allow_nan=False))
 
     def fail(self, summary: str, details: Any = None) -> None:
         """Write an expected data-gap result without raising an exception.

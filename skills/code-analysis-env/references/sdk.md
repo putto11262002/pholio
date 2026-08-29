@@ -52,7 +52,7 @@ Parameters:
 - `summary`: One short non-empty sentence describing what was done.
 - `result`: Compact JSON-serializable analysis result. Prefer a dict
   with metrics, warnings, and data gaps. Do not return raw
-  candles, full news lists, plots, or large tables.
+  candles, full news lists, plots, large tables, NaN, or Infinity.
 - `artifacts`: Optional UI artifacts such as metric grids, line charts,
   or tables. Keep payloads compact and downsample chart data.
 

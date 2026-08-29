@@ -29,11 +29,12 @@ const runAnalysisInput = z.object({
   ),
 })
 
-const artifactScalarSchema = z.union([z.string(), z.number(), z.null()])
+const artifactScalarSchema = z.union([z.string(), z.number().finite(), z.null()])
 const artifactKeySchema = z.string().trim().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(60)
 const artifactTitleSchema = z.string().trim().min(1).max(120)
 const artifactCaptionSchema = z.string().trim().max(240).optional()
 const artifactToneSchema = z.enum(["default", "positive", "negative", "warning"]).optional()
+const artifactTones = new Set(["default", "positive", "negative", "warning"])
 
 const metricGridArtifactSchema = z.object({
   type: z.literal("metric_grid"),
@@ -42,7 +43,7 @@ const metricGridArtifactSchema = z.object({
   caption: artifactCaptionSchema,
   items: z.array(z.object({
     label: z.string().trim().min(1).max(80),
-    value: z.union([z.string(), z.number()]),
+    value: z.union([z.string(), z.number().finite()]),
     unit: z.string().trim().max(24).optional(),
     tone: artifactToneSchema,
   })).min(1).max(MAX_METRIC_ITEMS),
@@ -77,7 +78,7 @@ const donutChartArtifactSchema = z.object({
   caption: artifactCaptionSchema,
   segments: z.array(z.object({
     label: z.string().trim().min(1).max(80),
-    value: z.number(),
+    value: z.number().finite(),
   })).min(1).max(MAX_DONUT_SEGMENTS),
 })
 
@@ -154,9 +155,10 @@ function parseAnalysisOutput(content: string): z.infer<typeof analysisOutputSche
     throw new Error("Analysis output must be valid JSON")
   }
 
-  const result = analysisOutputSchema.safeParse(parsed)
+  const normalized = normalizeAnalysisOutput(parsed)
+  const result = analysisOutputSchema.safeParse(normalized)
   if (!result.success) {
-    throw new Error(z.prettifyError(result.error))
+    throw new Error(formatValidationError(result.error))
   }
 
   const resultBytes = byteLength(JSON.stringify(result.data.result))
@@ -170,6 +172,114 @@ function parseAnalysisOutput(content: string): z.infer<typeof analysisOutputSche
   }
 
   return result.data
+}
+
+function formatValidationError(error: z.ZodError): string {
+  const issues = error.issues.slice(0, 5).map((issue) => {
+    const path = issue.path.length > 0 ? issue.path.join(".") : "output"
+    return `${path}: ${issue.message}`
+  })
+  const suffix = error.issues.length > issues.length ? ` (${error.issues.length - issues.length} more)` : ""
+  return `Analysis output shape is invalid: ${issues.join("; ")}${suffix}`
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function firstString(record: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === "string" && value.trim()) return value
+  }
+  return undefined
+}
+
+function normalizedTone(value: unknown): string {
+  return typeof value === "string" && artifactTones.has(value) ? value : "default"
+}
+
+function normalizeMetricItem(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  return {
+    ...value,
+    label: firstString(value, ["label", "name", "metric"]) ?? value.label,
+    tone: normalizedTone(value.tone),
+  }
+}
+
+function normalizeSeries(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  return {
+    ...value,
+    label: firstString(value, ["label", "name"]) ?? firstString(value, ["key"]) ?? value.label,
+  }
+}
+
+function normalizeColumn(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  return {
+    ...value,
+    label: firstString(value, ["label", "name"]) ?? firstString(value, ["key"]) ?? value.label,
+  }
+}
+
+function normalizeSegment(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  return {
+    ...value,
+    label: firstString(value, ["label", "name"]) ?? value.label,
+  }
+}
+
+function normalizeTimelineEvent(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  return {
+    ...value,
+    tone: normalizedTone(value.tone),
+  }
+}
+
+function normalizeArtifact(value: unknown): unknown {
+  if (!isRecord(value) || typeof value.type !== "string") return value
+
+  if (value.type === "metric_grid" && Array.isArray(value.items)) {
+    return { ...value, items: value.items.map(normalizeMetricItem) }
+  }
+
+  if ((value.type === "line_chart" || value.type === "area_chart" || value.type === "bar_chart") && Array.isArray(value.series)) {
+    return { ...value, series: value.series.map(normalizeSeries) }
+  }
+
+  if (value.type === "donut_chart" && Array.isArray(value.segments)) {
+    return { ...value, segments: value.segments.map(normalizeSegment) }
+  }
+
+  if (value.type === "table" && Array.isArray(value.columns)) {
+    return { ...value, columns: value.columns.map(normalizeColumn) }
+  }
+
+  if (value.type === "event_timeline" && Array.isArray(value.events)) {
+    return { ...value, events: value.events.map(normalizeTimelineEvent) }
+  }
+
+  if (value.type === "callout") {
+    return {
+      ...value,
+      body: firstString(value, ["body", "description"]) ?? value.body,
+      tone: normalizedTone(value.tone),
+    }
+  }
+
+  return value
+}
+
+function normalizeAnalysisOutput(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  return {
+    ...value,
+    artifacts: Array.isArray(value.artifacts) ? value.artifacts.map(normalizeArtifact) : value.artifacts,
+  }
 }
 
 function sandboxId(): string {
