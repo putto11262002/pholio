@@ -1,7 +1,7 @@
 import { useRef, useEffect, useLayoutEffect, useState, Suspense } from "react"
 import { useMutation } from "@tanstack/react-query"
 import { useAgent } from "agents/react"
-import { useAgentChat } from "agents/ai-react"
+import { useAgentChat } from "@cloudflare/ai-chat/react"
 import { AlertCircle, ArrowUp, Brain, CheckCircle2, ChevronDown, Loader2 } from "lucide-react"
 import { Streamdown, type Components } from "streamdown"
 import type { ChatMessage } from "@/agent/chat-message"
@@ -516,6 +516,17 @@ function RailRow({ part }: { part: AnyPart }) {
     )
   }
 
+  if (part.type === "reasoning-file") {
+    return (
+      <div className="text-muted-foreground flex min-w-0 items-center gap-2">
+        <RailNode><Brain className="size-3" /></RailNode>
+        <span className="text-foreground shrink-0 font-medium">Reasoning attachment</span>
+        <span className="shrink-0 opacity-40">·</span>
+        <span className="min-w-0 flex-1 truncate">{part.mediaType}</span>
+      </div>
+    )
+  }
+
   if (part.type.startsWith("tool-") || part.type === "dynamic-tool") {
     const toolName = toolNameForPart(part)
     const { isLoading, isDone, isError, label, loadingMsg, resultMsg, errorText } = toolPartRow(part)
@@ -607,7 +618,7 @@ function Message({ message, isStreaming }: { message: ChatMessage; isStreaming: 
       blocks.push({ kind: "text", text: (part as { text?: string }).text ?? "" })
       continue
     }
-    if (part.type === "reasoning" || part.type.startsWith("tool-") || part.type === "dynamic-tool") {
+    if (part.type === "reasoning" || part.type === "reasoning-file" || part.type.startsWith("tool-") || part.type === "dynamic-tool") {
       const last = blocks[blocks.length - 1]
       if (last && last.kind === "rail") last.parts.push(part)
       else blocks.push({ kind: "rail", parts: [part] })

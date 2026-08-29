@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { streamText } from "ai"
-import { MockLanguageModelV3, simulateReadableStream } from "ai/test"
+import { createUIMessageStreamResponse, streamText, toUIMessageStream } from "ai"
+import { MockLanguageModelV4, simulateReadableStream } from "ai/test"
 
 describe("chat reasoning stream", () => {
   it("preserves reasoning and final text in the UI message protocol", async () => {
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       provider: "gateway",
       modelId: "deepseek/deepseek-v4-flash",
       doStream: async () => ({
@@ -31,9 +31,11 @@ describe("chat reasoning stream", () => {
     })
 
     const result = streamText({ model, prompt: "What is my largest position?" })
-    const response = result.toUIMessageStreamResponse({ sendReasoning: true })
+    const response = createUIMessageStreamResponse({
+      stream: toUIMessageStream({ stream: result.stream, sendReasoning: true }),
+    })
     const protocol = await response.text()
-    const usage = await result.totalUsage
+    const usage = await result.usage
 
     expect(protocol).toContain('"type":"reasoning-start"')
     expect(protocol).toContain('"delta":"Check the portfolio first."')
