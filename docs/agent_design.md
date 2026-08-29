@@ -438,7 +438,7 @@ The SDK should feel like a small local data-analysis library for Pholio. It shou
 ### `pholio.output`
 
 - `write(result)`
-  - Write schema-shaped JSON to `/workspace/output.json`.
+  - Write schema-shaped JSON to `PHOLIO_OUTPUT_PATH` (falling back to `/workspace/output.json` outside managed runs).
 
 ### `pholio.portfolio`
 
@@ -956,13 +956,15 @@ They use a short-lived `PHOLIO_API_TOKEN` bearer token minted by the Worker for 
 
 ## Code execution slice
 
-`analysis_run_code` runs generated Python inside Cloudflare Sandbox. The sandbox image installs the local `pholio_sdk` package. The Worker writes `/workspace/run_analysis.py`, passes `PHOLIO_API_BASE_URL` and a short-lived `PHOLIO_API_TOKEN`, runs the code, and reads `/workspace/output.json`.
+`analysis_run_code` runs generated Python inside Cloudflare Sandbox. The sandbox image installs the local `pholio_sdk` package. Each conversation maps to one stable, normalized sandbox identity, while every tool call gets a unique `/workspace/runs/<uuid>` directory. The Worker writes that run's `run_analysis.py`, passes `PHOLIO_API_BASE_URL`, a short-lived `PHOLIO_API_TOKEN`, and `PHOLIO_OUTPUT_PATH`, then reads the run-local `output.json`.
 
-Status: prototype only. Normal compact tools are useful today, but code execution still needs a redesign/hardening pass before it is dependable. Known current issues:
+Execution uses the Sandbox 1.0 preview process-handle model. Launches use argv rather than a shell string, remote process deadlines backstop bounded local output waits, and stdout/stderr are capped. A cancelled or locally timed-out wait sends `SIGKILL` and waits for the supervised process group to exit. The run directory is removed by a separately supervised `rm -rf --` process in all outcomes; cleanup failures are recorded as metadata and never replace the primary success or failure. If an upload or process launch outlives the foreground cancellation window, the chat Agent defers a continuation with its Durable Object context so the late operation is stopped and the run directory is removed again without delaying the user-visible cancellation. The conversation sandbox is allowed to sleep between calls and is not destroyed after each run.
+
+Status: bounded lifecycle implemented on the Sandbox 1.0 preview. Known operational constraints:
 
 - Local runs can fail if `PHOLIO_API_BASE_URL` does not point at an origin reachable from the sandbox container.
-- The agent can make several failed analysis attempts.
-- There is not enough structured logging/debug visibility.
+- Application-level analysis retries are disabled; lifecycle errors become safe typed tool failures for the model to handle.
+- Logs intentionally contain only identifiers, timing, status, and typed error metadata. Generated code, task text, summaries, results, tokens, stdout, stderr, and raw error messages are excluded.
 - The SDK is now packaged into the sandbox image, but its generated reference docs are still maintained manually.
 
 The generated Python contract:

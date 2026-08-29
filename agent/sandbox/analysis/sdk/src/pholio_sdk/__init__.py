@@ -18,7 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-OUTPUT_PATH = Path("/workspace/output.json")
+OUTPUT_PATH = Path(os.environ.get("PHOLIO_OUTPUT_PATH", "/workspace/output.json"))
 DEFAULT_TIMEOUT_SECONDS = 20
 
 

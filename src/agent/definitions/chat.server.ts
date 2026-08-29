@@ -5,7 +5,7 @@ import { createModel } from "@/agent/gateway.server"
 import { generalChatModels, resolveGeneralChatModelKey, type GeneralChatModelKey } from "@/agent/general-chat-models"
 import { listAgentSkills } from "@/agent/skills/registry.server"
 import type { AgentSkillMetadata } from "@/agent/skills/types"
-import { createAnalysisTools } from "@/agent/tools/analysis.server"
+import { createAnalysisTools, type AnalysisTaskDefer } from "@/agent/tools/analysis.server"
 import { createPortfolioTools } from "@/agent/tools/portfolio.server"
 import { createResearchTools } from "@/agent/tools/research.server"
 import { skillTools } from "@/agent/tools/skills.server"
@@ -79,14 +79,16 @@ export async function runChatAgent({
   modelKey: modelKeyOpt,
   abortSignal,
   progress,
+  defer,
 }: {
   messages: ChatMessage[]
   onEnd: GenerateTextOnEndCallback<ToolSet>
   userId: string
-  threadId: string | null
+  threadId: string
   modelKey?: GeneralChatModelKey
   abortSignal?: AbortSignal
   progress?: ChatProgressCallbacks
+  defer?: AnalysisTaskDefer
 }) {
   const monthlySpend = await getMonthlySpend(userId)
   const limit = getMonthlyLimitUsd()
@@ -106,7 +108,7 @@ export async function runChatAgent({
     ...createPortfolioTools(userId),
     ...stockTools,
     ...researchTools,
-    ...createAnalysisTools(userId, ({ toolCallId, phase }) => progress?.analysisPhase(toolCallId, phase)),
+    ...createAnalysisTools(userId, threadId, ({ toolCallId, phase }) => progress?.analysisPhase(toolCallId, phase), defer),
   }
   const toolNames = Object.keys(tools) as Array<keyof typeof tools & string>
   const failureTracker = new ToolFailureTracker()

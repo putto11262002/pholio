@@ -47,7 +47,9 @@
           "name": "pholio-analysissandbox-dev",
           "class_name": "AnalysisSandbox",
           "image": "./agent/sandbox/analysis/Dockerfile",
-          "instance_type": "lite"
+          "instance_type": "lite",
+          "max_instances": 20,
+          "rollout_active_grace_period": 0
         }
       ],
       "durable_objects": {
@@ -62,7 +64,9 @@
     {
       "class_name": "AnalysisSandbox",
       "image": "./agent/sandbox/analysis/Dockerfile",
-      "instance_type": "lite"
+      "instance_type": "lite",
+      "max_instances": 20,
+      "rollout_active_grace_period": 0
     }
   ],
   "durable_objects": {
