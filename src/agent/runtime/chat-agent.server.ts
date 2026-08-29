@@ -26,6 +26,7 @@ export class ChatAgent extends AIChatAgent<Env> {
       userId,
       threadId,
       modelKey,
+      abortSignal: options?.abortSignal,
     })
 
     return createUIMessageStreamResponse({

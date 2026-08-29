@@ -1,4 +1,4 @@
-import { Suspense, useState, useRef, useCallback, type ReactNode } from "react"
+import { Suspense, useState, useRef, useCallback, type CSSProperties, type ReactNode } from "react"
 import { useSuspenseQuery } from "@tanstack/react-query"
 import { getCurrentUserFn } from "@/auth"
 import { QueryErrorBoundary } from "@/components/query-error-boundary"
@@ -8,7 +8,7 @@ import { AppSidebar } from "./app-sidebar"
 import { UserMenu } from "./user-menu"
 import { AuthError } from "./auth-error"
 import { AuthSplash } from "./auth-splash"
-import { ChevronDown, LayoutDashboard, MessageSquare, PieChart, TrendingUp, Zap } from "lucide-react"
+import { ChevronDown, LayoutDashboard, PieChart, TrendingUp, Zap } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {
   DropdownMenu,
@@ -34,7 +34,6 @@ export function AppShell({ children }: { children: ReactNode }) {
 }
 
 function AppShellInner({ children }: { children: ReactNode }) {
-  const [chatOpen, setChatOpen] = useState(true)
   const [mobileView, setMobileView] = useState<"app" | "chat">("app")
   const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_WIDTH)
   const [isDragging, setIsDragging] = useState(false)
@@ -73,47 +72,9 @@ function AppShellInner({ children }: { children: ReactNode }) {
 
   return (
     <TooltipProvider>
-      {/* ── Desktop (lg+): side-by-side ── */}
-      <div className="hidden lg:flex h-svh overflow-hidden">
-        {/* App side */}
-        <div className="flex flex-1 min-w-0">
-          <AppSidebar />
-          <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-            <main className="flex-1 overflow-y-auto">{children}</main>
-          </div>
-        </div>
-
-        {/* Chat card — drag handle is the left edge of the card */}
-        {chatOpen ? (
-          <div
-            style={{ width: chatWidth }}
-            className={cn("shrink-0 flex my-2 mr-2 rounded-4xl overflow-hidden border-2 shadow-lg transition-colors", isDragging ? "border-primary" : "border-primary/70")}
-          >
-            {/* Drag handle — left edge of the card */}
-            <div
-              onPointerDown={startResize}
-              className="w-1 shrink-0 cursor-col-resize rounded-l-4xl"
-            />
-            {/* Chat content */}
-            <div className="flex-1 flex flex-col min-w-0">
-              <ChatPanel />
-            </div>
-          </div>
-        ) : (
-          <button
-            onClick={() => setChatOpen(true)}
-            className="shrink-0 flex items-center justify-center w-8 hover:bg-muted transition-colors"
-            aria-label="Open chat"
-          >
-            <MessageSquare className="size-4 text-muted-foreground" />
-          </button>
-        )}
-      </div>
-
-      {/* ── Mobile (<lg): floating pill toggle ── */}
-      <div className="relative flex lg:hidden h-svh overflow-hidden">
+      <div className="relative flex h-svh overflow-hidden">
         {/* Floating pill */}
-        <div className="absolute top-4 left-0 right-0 z-50 flex justify-center pointer-events-none">
+        <div className="absolute top-4 left-0 right-0 z-50 flex justify-center pointer-events-none lg:hidden">
           <div className="pointer-events-auto flex items-center gap-0.5 rounded-full border border-border bg-background/80 backdrop-blur-sm shadow-lg p-1">
             {/* App dropdown */}
             <DropdownMenu>
@@ -173,19 +134,30 @@ function AppShellInner({ children }: { children: ReactNode }) {
           </div>
         </div>
 
-        {/* Active view — full bleed, pill floats above */}
-        {mobileView === "app" ? (
-          <div className="flex h-full w-full overflow-hidden">
-            <div className="hidden lg:block"><AppSidebar /></div>
-            <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-              <main className="flex-1 overflow-y-auto pt-16">{children}</main>
-            </div>
+        {/* App and chat stay mounted while the mobile toggle changes visibility. */}
+        <div className={cn("h-full min-w-0 overflow-hidden lg:flex lg:flex-1", mobileView === "app" ? "flex w-full" : "hidden")}>
+          <div className="hidden lg:block"><AppSidebar /></div>
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            <main className="flex-1 overflow-y-auto pt-16 lg:pt-0">{children}</main>
           </div>
-        ) : (
-          <div className="h-full w-full overflow-hidden pt-16">
+        </div>
+
+        <div
+          style={{ "--chat-width": `${chatWidth}px` } as CSSProperties}
+          className={cn(
+            "h-full w-full shrink-0 overflow-hidden pt-16 lg:my-2 lg:mr-2 lg:h-auto lg:w-[var(--chat-width)] lg:rounded-4xl lg:border-2 lg:pt-0 lg:shadow-lg lg:transition-colors",
+            mobileView === "chat" ? "flex" : "hidden lg:flex",
+            isDragging ? "lg:border-primary" : "lg:border-primary/70",
+          )}
+        >
+          <div
+            onPointerDown={startResize}
+            className="hidden w-1 shrink-0 cursor-col-resize rounded-l-4xl lg:block"
+          />
+          <div className="flex min-w-0 flex-1 flex-col">
             <ChatPanel />
           </div>
-        )}
+        </div>
       </div>
     </TooltipProvider>
   )

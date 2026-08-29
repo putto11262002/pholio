@@ -2,7 +2,7 @@ import { useRef, useEffect, useLayoutEffect, useState, Suspense } from "react"
 import { useMutation } from "@tanstack/react-query"
 import { useAgent } from "agents/react"
 import { useAgentChat } from "@cloudflare/ai-chat/react"
-import { AlertCircle, ArrowUp, Brain, CheckCircle2, ChevronDown, Loader2 } from "lucide-react"
+import { AlertCircle, ArrowUp, Brain, CheckCircle2, ChevronDown, Loader2, RotateCcw, Square } from "lucide-react"
 import { Streamdown, type Components } from "streamdown"
 import type { ChatMessage } from "@/agent/chat-message"
 import { ArtifactBlock, ArtifactView, parseArtifact, type AnalysisArtifact } from "@/components/artifacts/analysis-artifacts"
@@ -34,8 +34,23 @@ import {
 } from "@/agent/general-chat-models"
 import { useAuth } from "@clerk/tanstack-react-start"
 import { ConversationSidebar, ConversationToggle } from "@/components/chat/thread-switcher"
-import { createThreadFn, getThreadFn, updateThreadFn } from "@/thread/functions"
+import { createThreadFn, deleteThreadFn, getThreadFn, updateThreadFn } from "@/thread/functions"
 import type { Thread } from "@/thread/types"
+import {
+  beginTurn,
+  cancelTurn as cancelTurnGeneration,
+  completeTurn as completeTurnGeneration,
+  createSelectionIntentTracker,
+  createTurnGenerationQueue,
+  initialTurnGenerationState,
+  latestTurnGeneration,
+  resolveCreatedThreadIntent,
+  resolveChatLifecycle,
+  retryTurn,
+  turnGenerationForFinishedMessage,
+  type ChatConnectionState,
+  type ChatLifecycleState,
+} from "@/components/chat/chat-lifecycle"
 
 const THREAD_LS_KEY = "activeThreadId"
 
@@ -593,6 +608,36 @@ function WorkingIndicator() {
   )
 }
 
+function LifecycleNotice({ state, error, onRetry }: { state: ChatLifecycleState; error?: string; onRetry: () => void }) {
+  const labels: Partial<Record<ChatLifecycleState, string>> = {
+    connecting: "Connecting…",
+    waiting: "Waiting for model…",
+    streaming: "Responding…",
+    recovering: "Recovering response…",
+    continuing: "Continuing after tools…",
+    completed: "Complete",
+    cancelled: "Cancelled — partial response kept.",
+  }
+  if (state === "idle") return null
+  if (state === "failed") {
+    return (
+      <div className="bg-destructive/10 text-destructive flex items-center justify-between gap-3 rounded-2xl px-3 py-2 text-xs" role="alert">
+        <span className="min-w-0 truncate">{error || "The response failed."}</span>
+        <button type="button" onClick={onRetry} className="hover:bg-destructive/10 flex shrink-0 items-center gap-1 rounded-full px-2 py-1 font-medium">
+          <RotateCcw className="size-3" /> Retry
+        </button>
+      </div>
+    )
+  }
+  const isActive = state === "connecting" || state === "waiting" || state === "streaming" || state === "recovering" || state === "continuing"
+  return (
+    <div className="text-muted-foreground flex items-center gap-2 px-1 text-xs" aria-live="polite">
+      {isActive ? <Loader2 className="size-3 animate-spin" /> : state === "cancelled" ? <Square className="size-3 fill-current" /> : <CheckCircle2 className="size-3" />}
+      <span>{labels[state]}</span>
+    </div>
+  )
+}
+
 function Message({ message, isStreaming }: { message: ChatMessage; isStreaming: boolean }) {
   if (message.role === "user") {
     const textPart = message.parts.find((p) => p.type === "text") as { text?: string } | undefined
@@ -683,15 +728,83 @@ function ConnectedChat({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const justSubmittedRef = useRef(false)
   const hasInitialScrolledRef = useRef(false)
+  const hasConnectedRef = useRef(false)
   const [input, setInput] = useState("")
   const [modelOpen, setModelOpen] = useState(false)
+  const [connectionState, setConnectionState] = useState<ChatConnectionState>("connecting")
+  const [turnState, setTurnState] = useState(initialTurnGenerationState)
+  const turnStateRef = useRef(initialTurnGenerationState)
+  const turnCompletionQueueRef = useRef(createTurnGenerationQueue())
 
-  const agent = useAgent({ agent: "chat", name: threadId })
-  const { messages, sendMessage, isStreaming } = useAgentChat<unknown, ChatMessage>({
-    agent,
-    resume: false,
-    body: () => ({ modelKey, providerOptions }),
+  function transitionTurn(update: (state: typeof initialTurnGenerationState) => typeof initialTurnGenerationState) {
+    const next = update(turnStateRef.current)
+    turnStateRef.current = next
+    setTurnState(next)
+    return next
+  }
+
+  function startTurn() {
+    const generation = transitionTurn(beginTurn).current
+    turnCompletionQueueRef.current.enqueue(generation)
+    return generation
+  }
+
+  function startRetry() {
+    const generation = transitionTurn(retryTurn).current
+    turnCompletionQueueRef.current.enqueue(generation)
+    return generation
+  }
+
+  const agent = useAgent({
+    agent: "chat",
+    name: threadId,
+    onOpen: () => {
+      hasConnectedRef.current = true
+      setConnectionState("connected")
+    },
+    onClose: () => setConnectionState(hasConnectedRef.current ? "reconnecting" : "connecting"),
   })
+  const {
+    messages, sendMessage, regenerate, stop, clearError, status, error,
+    isStreaming, isRecovering, isToolContinuation, connectionError,
+  } = useAgentChat<unknown, ChatMessage>({
+    agent,
+    cancelOnClientAbort: false,
+    body: () => ({ modelKey, providerOptions }),
+    onFinish: ({ message, messages: finishedMessages, isAbort }) => {
+      const generation = turnCompletionQueueRef.current.resolve(
+        turnGenerationForFinishedMessage(message.id, finishedMessages),
+      )
+      if (generation === undefined) return
+      transitionTurn((current) => isAbort
+        ? cancelTurnGeneration(current, generation)
+        : completeTurnGeneration(current, generation))
+    },
+  })
+
+  const wasCancelled = turnState.cancelled === turnState.current && turnState.current > 0
+  const hasCompletedTurn = status === "ready"
+    && turnState.completed === turnState.current
+    && turnState.current > 0
+  const lifecycle = resolveChatLifecycle({
+    connectionState, status, isStreaming, isRecovering, isToolContinuation,
+    hasCompletedTurn, wasCancelled, hasError: Boolean(error || connectionError),
+  })
+  const isBusy = !wasCancelled && (
+    status === "submitted" || status === "streaming" || isStreaming || isRecovering || isToolContinuation
+  )
+
+  useEffect(() => {
+    if (turnStateRef.current.current > 0) return
+    const persistedGeneration = latestTurnGeneration(messages)
+    if (persistedGeneration !== undefined) {
+      transitionTurn(() => ({ current: persistedGeneration, cancelled: null, completed: null }))
+      return
+    }
+    if (isStreaming || isRecovering || isToolContinuation || status === "submitted" || status === "streaming") {
+      startTurn()
+    }
+  }, [messages, isStreaming, isRecovering, isToolContinuation, status])
 
   const selectedModel = generalChatModels[modelKey] as GeneralChatModel
   const thinkingLevels = selectedModel.thinking?.levels ?? []
@@ -724,15 +837,16 @@ function ConnectedChat({
   useEffect(() => {
     if (!initialMessage || hasSentInitialRef.current) return
     hasSentInitialRef.current = true
-    sendMessage({ text: initialMessage })
+    const turnGeneration = startTurn()
+    sendMessage({ text: initialMessage, metadata: { turnGeneration } })
     onInitialMessageSent?.()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Refocus textarea when streaming ends
   useEffect(() => {
-    if (!isStreaming) textareaRef.current?.focus()
-  }, [isStreaming])
+    if (!isBusy) textareaRef.current?.focus()
+  }, [isBusy])
 
   // Keep paddingBottom in sync with floating input height
   useEffect(() => {
@@ -770,10 +884,27 @@ function ConnectedChat({
 
   function submit() {
     const text = input.trim()
-    if (!text || isStreaming) return
+    if (!text || isBusy) return
     setInput("")
+    const turnGeneration = startTurn()
     justSubmittedRef.current = true
-    sendMessage({ text })
+    sendMessage({ text, metadata: { turnGeneration } })
+  }
+
+  function cancelTurn() {
+    const generation = turnStateRef.current.current
+    transitionTurn((current) => cancelTurnGeneration(current, generation))
+    void stop()
+  }
+
+  function retry() {
+    if (connectionError) {
+      agent.reconnect()
+      return
+    }
+    startRetry()
+    clearError()
+    void regenerate()
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -809,16 +940,16 @@ function ConnectedChat({
               return (
                 <>
                   {leading.map(({ msg, idx }) => (
-                    <div key={msg.id}><Message message={msg} isStreaming={isStreaming && idx === messages.length - 1} /></div>
+                    <div key={msg.id}><Message message={msg} isStreaming={isBusy && idx === messages.length - 1} /></div>
                   ))}
                   {pairs.map((pair, pi) => {
                     const isLast = pi === pairs.length - 1
                     return (
                       <div key={pair.user.id} ref={isLast ? lastPairRef : undefined} className="space-y-6 pt-6">
                         <div><Message message={pair.user} isStreaming={false} /></div>
-                        {isLast && isStreaming && (!pair.assistant || pair.assistant.parts.length === 0) && <WorkingIndicator />}
+                        {isLast && isBusy && (!pair.assistant || pair.assistant.parts.length === 0) && <WorkingIndicator />}
                         {pair.assistant && (
-                          <div><Message message={pair.assistant} isStreaming={isStreaming && pair.assistantIdx === messages.length - 1} /></div>
+                          <div><Message message={pair.assistant} isStreaming={isBusy && pair.assistantIdx === messages.length - 1} /></div>
                         )}
                       </div>
                     )
@@ -833,6 +964,9 @@ function ConnectedChat({
       {/* Floating input */}
       <div ref={floatingRef} className="absolute bottom-4 left-4 right-4 pointer-events-none flex flex-col gap-1.5">
         <div className="pointer-events-auto">
+          <LifecycleNotice state={lifecycle} error={error?.message ?? connectionError?.message} onRetry={retry} />
+        </div>
+        <div className="pointer-events-auto">
           <InputGroup className="border-primary bg-background/80 backdrop-blur-sm shadow-xl ring-1 ring-primary/30 has-[[data-slot=input-group-control]:focus-visible]:border-primary has-[[data-slot=input-group-control]:focus-visible]:ring-primary/30">
             <InputGroupTextarea
               ref={textareaRef}
@@ -842,13 +976,13 @@ function ConnectedChat({
               placeholder="Ask about your portfolio…"
               className="max-h-32 px-4 pt-4 text-sm"
               rows={2}
-              disabled={isStreaming}
+              disabled={isBusy}
             />
             <InputGroupAddon align="block-end" className="justify-between">
               <div className="flex items-center gap-1">
                 <Popover open={modelOpen} onOpenChange={setModelOpen}>
                   <PopoverTrigger asChild>
-                    <button type="button" disabled={isStreaming}
+                    <button type="button" disabled={isBusy}
                       className="flex items-center gap-1 rounded-full px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50">
                       {selectedModel.label}
                       <ChevronDown className="size-3 opacity-60" />
@@ -868,7 +1002,7 @@ function ConnectedChat({
                 {thinkingLevels.length > 0 && (
                   <Popover>
                     <PopoverTrigger asChild>
-                      <button type="button" disabled={isStreaming}
+                      <button type="button" disabled={isBusy}
                         className="flex items-center gap-1 rounded-full px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50">
                         Think: {thinkingLevels.find((l) => l.key === currentThinkingKey)?.label ?? "Off"}
                         <ChevronDown className="size-3 opacity-60" />
@@ -886,8 +1020,9 @@ function ConnectedChat({
                   </Popover>
                 )}
               </div>
-              <InputGroupButton size="icon-sm" variant="default" onClick={submit} disabled={isStreaming || !input.trim()}>
-                <ArrowUp />
+              <InputGroupButton size="icon-sm" variant="default" onClick={isBusy ? cancelTurn : submit}
+                disabled={!isBusy && !input.trim()} aria-label={isBusy ? "Stop response" : "Send message"}>
+                {isBusy ? <Square className="size-3 fill-current" /> : <ArrowUp />}
               </InputGroupButton>
             </InputGroupAddon>
           </InputGroup>
@@ -1073,13 +1208,34 @@ export function ChatPanel() {
   const [modelKey, setModelKey] = useState<GeneralChatModelKey>(DEFAULT_GENERAL_CHAT_MODEL)
   const [providerOptions, setProviderOptions] = useState<ProviderOptions>({})
   const [pendingMessage, setPendingMessage] = useState<string | null>(null)
+  const [creatingIntent, setCreatingIntent] = useState<number | null>(null)
+  const selectionIntentRef = useRef(createSelectionIntentTracker())
 
   const createMutation = useMutation({
-    mutationFn: () => createThreadFn({ data: { modelKey, providerOptions } }),
-    onSuccess: (id) => {
-      setActiveThreadId(id)
-      setActiveTitle(null)
-      localStorage.setItem(THREAD_LS_KEY, id)
+    mutationFn: (creation: { intent: number; text: string; modelKey: GeneralChatModelKey; providerOptions: ProviderOptions }) =>
+      createThreadFn({ data: { modelKey: creation.modelKey, providerOptions: creation.providerOptions } }),
+    onSuccess: async (id, creation) => {
+      await resolveCreatedThreadIntent({
+        id,
+        intent: creation.intent,
+        tracker: selectionIntentRef.current,
+        select: (selectedId) => {
+          setPendingMessage(creation.text)
+          setActiveThreadId(selectedId)
+          setActiveTitle(null)
+          localStorage.setItem(THREAD_LS_KEY, selectedId)
+        },
+        remove: async (staleId) => {
+          try {
+            await deleteThreadFn({ data: { id: staleId } })
+          } catch (error) {
+            console.error("Failed to remove stale conversation", error)
+          }
+        },
+      })
+    },
+    onSettled: (_data, _error, creation) => {
+      if (selectionIntentRef.current.isCurrent(creation.intent)) setCreatingIntent(null)
     },
   })
 
@@ -1089,10 +1245,12 @@ export function ChatPanel() {
 
   // Init — restore last thread if available, otherwise show empty (no server call)
   useEffect(() => {
+    const restoreIntent = selectionIntentRef.current.capture()
     const stored = localStorage.getItem(THREAD_LS_KEY)
     if (stored) {
       getThreadFn({ data: { id: stored } })
         .then((t) => {
+          if (!selectionIntentRef.current.isCurrent(restoreIntent)) return
           if (t) {
             const resolvedModelKey = resolveGeneralChatModelKey(t.modelKey)
             setActiveThreadId(t.id)
@@ -1104,7 +1262,9 @@ export function ChatPanel() {
             localStorage.removeItem(THREAD_LS_KEY)
           }
         })
-        .catch(() => localStorage.removeItem(THREAD_LS_KEY))
+        .catch(() => {
+          if (selectionIntentRef.current.isCurrent(restoreIntent)) localStorage.removeItem(THREAD_LS_KEY)
+        })
         .finally(() => setInitialized(true))
     } else {
       setInitialized(true)
@@ -1113,6 +1273,8 @@ export function ChatPanel() {
   }, [])
 
   function handleThreadSelect(t: Thread) {
+    selectionIntentRef.current.supersede()
+    setCreatingIntent(null)
     const resolvedModelKey = resolveGeneralChatModelKey(t.modelKey)
     setActiveThreadId(t.id)
     setActiveTitle(t.title ?? null)
@@ -1123,6 +1285,8 @@ export function ChatPanel() {
   }
 
   function handleNewConversation() {
+    selectionIntentRef.current.supersede()
+    setCreatingIntent(null)
     setActiveThreadId(null)
     setActiveTitle(null)
     setModelKey(DEFAULT_GENERAL_CHAT_MODEL)
@@ -1156,8 +1320,9 @@ export function ChatPanel() {
 
   // Called from the pre-chat input — create thread then hand off the message
   function handleFirstMessage(text: string) {
-    setPendingMessage(text)
-    createMutation.mutate()
+    const intent = selectionIntentRef.current.supersede()
+    setCreatingIntent(intent)
+    createMutation.mutate({ intent, text, modelKey, providerOptions })
   }
 
   return (
@@ -1181,7 +1346,7 @@ export function ChatPanel() {
         <PreChatInput
           modelKey={modelKey}
           providerOptions={providerOptions}
-          isLoading={createMutation.isPending}
+          isLoading={creatingIntent !== null}
           onModelSelect={handleModelSelect}
           onThinkingSelect={handleThinkingSelect}
           onSubmit={handleFirstMessage}
