@@ -1,10 +1,9 @@
-import { createOpenAI } from "@ai-sdk/openai"
+import { createGateway, type GatewayModelId } from "ai"
 import { env } from "cloudflare:workers"
 
-export function createModel(modelId: string) {
-  const gateway = createOpenAI({
-    baseURL: "https://ai-gateway.vercel.sh/v1",
+export function createModel(modelId: GatewayModelId) {
+  const gateway = createGateway({
     apiKey: env.VERCEL_AI_GATEWAY_KEY,
   })
-  return gateway.chat(modelId)
+  return gateway(modelId)
 }

@@ -27,7 +27,7 @@ export class ChatAgent extends AIChatAgent<Env> {
       modelKey,
     })
 
-    return result.toUIMessageStreamResponse<ChatMessage>()
+    return result.toUIMessageStreamResponse<ChatMessage>({ sendReasoning: true })
   }
 
   async onRequest(request: Request): Promise<Response> {
