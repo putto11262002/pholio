@@ -4,7 +4,7 @@ import type { OnChatMessageOptions } from "@cloudflare/ai-chat"
 import { verifyToken } from "@clerk/backend"
 import type { ChatMessage } from "@/agent/chat-message"
 import { runChatAgent } from "@/agent/definitions/chat.server"
-import type { GeneralChatModelKey, ProviderOptions } from "@/agent/general-chat-models"
+import type { GeneralChatModelKey } from "@/agent/general-chat-models"
 import { getThreadOwnerUserId } from "@/thread/api.server"
 
 export class ChatAgent extends AIChatAgent<Env> {
@@ -16,7 +16,6 @@ export class ChatAgent extends AIChatAgent<Env> {
 
   async onChatMessage(onFinish: StreamTextOnFinishCallback<ToolSet>, options?: OnChatMessageOptions) {
     const modelKey = options?.body?.modelKey as GeneralChatModelKey | undefined
-    const providerOptions = options?.body?.providerOptions as ProviderOptions | undefined
     const userId = await this.getThreadUserId()
     const threadId = this.name
 
@@ -26,7 +25,6 @@ export class ChatAgent extends AIChatAgent<Env> {
       userId,
       threadId,
       modelKey,
-      providerOptions,
     })
 
     return result.toUIMessageStreamResponse<ChatMessage>()

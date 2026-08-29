@@ -27,6 +27,7 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/h
 import {
   generalChatModels,
   DEFAULT_GENERAL_CHAT_MODEL,
+  resolveGeneralChatModelKey,
   type GeneralChatModel,
   type GeneralChatModelKey,
   type ProviderOptions,
@@ -1082,10 +1083,11 @@ export function ChatPanel() {
       getThreadFn({ data: { id: stored } })
         .then((t) => {
           if (t) {
+            const resolvedModelKey = resolveGeneralChatModelKey(t.modelKey)
             setActiveThreadId(t.id)
             setActiveTitle(t.title ?? null)
-            setModelKey((t.modelKey as GeneralChatModelKey) ?? DEFAULT_GENERAL_CHAT_MODEL)
-            setProviderOptions((t.providerOptions as ProviderOptions) ?? {})
+            setModelKey(resolvedModelKey)
+            setProviderOptions({})
             localStorage.setItem(THREAD_LS_KEY, t.id)
           } else {
             localStorage.removeItem(THREAD_LS_KEY)
@@ -1100,10 +1102,11 @@ export function ChatPanel() {
   }, [])
 
   function handleThreadSelect(t: Thread) {
+    const resolvedModelKey = resolveGeneralChatModelKey(t.modelKey)
     setActiveThreadId(t.id)
     setActiveTitle(t.title ?? null)
-    setModelKey((t.modelKey as GeneralChatModelKey) ?? DEFAULT_GENERAL_CHAT_MODEL)
-    setProviderOptions((t.providerOptions as ProviderOptions) ?? {})
+    setModelKey(resolvedModelKey)
+    setProviderOptions({})
     setPendingMessage(null)
     localStorage.setItem(THREAD_LS_KEY, t.id)
   }

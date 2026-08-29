@@ -9,16 +9,10 @@ type ModelPricing = {
 // cacheWritePerM is not published by Vercel for these models — using input rate as conservative fallback
 export const MODEL_PRICING: Record<string, ModelPricing> = {
   "deepseek/deepseek-v4-flash": {
-    inputPerM: 0.14,
-    cacheReadPerM: 0.0028,
-    cacheWritePerM: 0.14,
-    outputPerM: 0.28,
-  },
-  "deepseek/deepseek-v4-pro": {
-    inputPerM: 0.435,
-    cacheReadPerM: 0.0036,
-    cacheWritePerM: 0.435,
-    outputPerM: 0.87,
+    inputPerM: 0.13,
+    cacheReadPerM: 0.028,
+    cacheWritePerM: 0.13,
+    outputPerM: 0.26,
   },
 }
 
