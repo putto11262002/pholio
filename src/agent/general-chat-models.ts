@@ -22,21 +22,14 @@ export const generalChatModels = {
     label: "DeepSeek V4 Flash",
     contextWindow: 1_000_000,
   },
-  pro: {
-    id: "deepseek/deepseek-v4-pro",
-    label: "DeepSeek V4 Pro",
-    contextWindow: 1_000_000,
-    thinking: {
-      levels: [
-        { key: "off",  label: "Off",  providerOptions: {} },
-        { key: "high", label: "High", providerOptions: { openai: { reasoning_effort: "medium" } } },
-        { key: "max",  label: "Max",  providerOptions: { openai: { reasoning_effort: "high" } } },
-      ],
-      default: {},
-    },
-  },
 } satisfies Record<string, GeneralChatModel>
 
 export type GeneralChatModelKey = keyof typeof generalChatModels
 
 export const DEFAULT_GENERAL_CHAT_MODEL: GeneralChatModelKey = "flash"
+
+export function resolveGeneralChatModelKey(modelKey?: string): GeneralChatModelKey {
+  return modelKey && modelKey in generalChatModels
+    ? (modelKey as GeneralChatModelKey)
+    : DEFAULT_GENERAL_CHAT_MODEL
+}

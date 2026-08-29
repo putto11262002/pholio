@@ -2,7 +2,7 @@ import { NoObjectGeneratedError, generateObject } from "ai"
 import { createModel } from "@/agent/gateway.server"
 import { slipExtractionSchema, type SlipExtraction } from "@/slip/schemas"
 
-const EXTRACTION_MODEL_ID = "google/gemini-3.1-flash-lite-preview"
+const EXTRACTION_MODEL_ID = "google/gemini-3.1-flash-lite"
 
 const SYSTEM_PROMPT = `You parse images of single-trade confirmation slips from Thai brokers (Dime, Liberator, Webull TH, BLS, KSS, Pi, etc.) for US-stock buys and sells.
 

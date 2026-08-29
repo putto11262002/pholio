@@ -2,7 +2,7 @@ import { streamText, convertToModelMessages, stepCountIs } from "ai"
 import type { StreamTextOnFinishCallback, ToolSet } from "ai"
 import type { ChatMessage } from "@/agent/chat-message"
 import { createModel } from "@/agent/gateway.server"
-import { generalChatModels, DEFAULT_GENERAL_CHAT_MODEL, type GeneralChatModelKey, type ProviderOptions } from "@/agent/general-chat-models"
+import { generalChatModels, resolveGeneralChatModelKey, type GeneralChatModelKey } from "@/agent/general-chat-models"
 import { listAgentSkills } from "@/agent/skills/registry.server"
 import type { AgentSkillMetadata } from "@/agent/skills/types"
 import { createAnalysisTools } from "@/agent/tools/analysis.server"
@@ -73,14 +73,12 @@ export async function runChatAgent({
   userId,
   threadId,
   modelKey: modelKeyOpt,
-  providerOptions,
 }: {
   messages: ChatMessage[]
   onFinish: StreamTextOnFinishCallback<ToolSet>
   userId: string
   threadId: string | null
   modelKey?: GeneralChatModelKey
-  providerOptions?: ProviderOptions
 }) {
   const monthlySpend = await getMonthlySpend(userId)
   const limit = getMonthlyLimitUsd()
@@ -88,8 +86,8 @@ export async function runChatAgent({
     throw new Error(`Monthly usage limit of $${limit.toFixed(2)} reached. Current spend: $${monthlySpend.toFixed(4)}.`)
   }
 
-  const modelKey = (modelKeyOpt ?? DEFAULT_GENERAL_CHAT_MODEL) as GeneralChatModelKey
-  const modelId = generalChatModels[modelKey]?.id ?? generalChatModels[DEFAULT_GENERAL_CHAT_MODEL].id
+  const modelKey = resolveGeneralChatModelKey(modelKeyOpt)
+  const modelId = generalChatModels[modelKey].id
   const modelMessages = await convertToModelMessages(messages)
   const skills = await listAgentSkills()
   const researchTools = createResearchTools()
@@ -134,7 +132,6 @@ export async function runChatAgent({
       stepMs: CHAT_STEP_TIMEOUT_MS,
       chunkMs: CHAT_CHUNK_TIMEOUT_MS,
     },
-    providerOptions,
     onError: (event) => {
       console.error(JSON.stringify({
         event: "agent.chat.error",
