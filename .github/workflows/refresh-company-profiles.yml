@@ -1,0 +1,58 @@
+name: Refresh company profiles
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Optional number of S&P 500 profiles to refresh (blank refreshes all)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-company-profiles-production
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Validate required secrets
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+        run: |
+          if [[ -z "$DATABASE_URL" ]]; then
+            echo "Missing GitHub Actions secret: DATABASE_URL" >&2
+            exit 1
+          fi
+          if [[ -z "$FINNHUB_API_KEY" ]]; then
+            echo "Missing GitHub Actions secret: FINNHUB_API_KEY" >&2
+            exit 1
+          fi
+
+      - name: Refresh S&P 500 company profiles
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          PROFILE_LIMIT: ${{ inputs.limit }}
+        run: |
+          if [[ -n "$PROFILE_LIMIT" ]]; then
+            pnpm exec tsx scripts/seed-profiles.ts --limit "$PROFILE_LIMIT"
+          else
+            pnpm exec tsx scripts/seed-profiles.ts
+          fi
