@@ -12,6 +12,7 @@ import { skillTools } from "@/agent/tools/skills.server"
 import { stockTools } from "@/agent/tools/stock.server"
 import { createToolErrorTransform, sanitizeToolErrorMessage, ToolFailureTracker } from "@/agent/tools/errors.server"
 import { buildAiRun, getMonthlyLimitUsd, getMonthlySpend, insertAiRun } from "@/agent/usage/api.server"
+import type { ChatProgressCallbacks } from "@/agent/runtime/chat-progress.server"
 
 const CHAT_TOTAL_TIMEOUT_MS = 90_000
 const CHAT_STEP_TIMEOUT_MS = 45_000
@@ -77,6 +78,7 @@ export async function runChatAgent({
   threadId,
   modelKey: modelKeyOpt,
   abortSignal,
+  progress,
 }: {
   messages: ChatMessage[]
   onEnd: GenerateTextOnEndCallback<ToolSet>
@@ -84,6 +86,7 @@ export async function runChatAgent({
   threadId: string | null
   modelKey?: GeneralChatModelKey
   abortSignal?: AbortSignal
+  progress?: ChatProgressCallbacks
 }) {
   const monthlySpend = await getMonthlySpend(userId)
   const limit = getMonthlyLimitUsd()
@@ -103,7 +106,7 @@ export async function runChatAgent({
     ...createPortfolioTools(userId),
     ...stockTools,
     ...researchTools,
-    ...createAnalysisTools(userId),
+    ...createAnalysisTools(userId, ({ toolCallId, phase }) => progress?.analysisPhase(toolCallId, phase)),
   }
   const toolNames = Object.keys(tools) as Array<keyof typeof tools & string>
   const failureTracker = new ToolFailureTracker()
@@ -160,6 +163,7 @@ export async function runChatAgent({
       chunkMs: CHAT_CHUNK_TIMEOUT_MS,
     },
     onError: (event) => {
+      progress?.recovering()
       console.error(JSON.stringify({
         event: "agent.chat.error",
         threadId,
@@ -167,6 +171,7 @@ export async function runChatAgent({
       }))
     },
     onAbort: (event) => {
+      progress?.cancelled()
       console.warn(JSON.stringify({
         event: "agent.chat.abort",
         threadId,
@@ -174,6 +179,7 @@ export async function runChatAgent({
       }))
     },
     onToolExecutionStart: (event) => {
+      progress?.toolStarted(event.toolCall.toolName, event.toolCall.toolCallId, event.toolCall.input)
       console.info(JSON.stringify({
         event: "agent.chat.tool_start",
         threadId,
@@ -187,6 +193,7 @@ export async function runChatAgent({
       const success = event.toolOutput.type === "tool-result" && !businessFailure
       const error = event.toolOutput.type === "tool-error" ? event.toolOutput.error : undefined
       const outputJson = output === undefined ? undefined : JSON.stringify(output)
+      progress?.toolFinished(event.toolCall.toolName, event.toolCall.toolCallId, success, output)
       console.info(JSON.stringify({
         event: "agent.chat.tool_finish",
         threadId,
@@ -206,6 +213,13 @@ export async function runChatAgent({
         toolCalls: event.toolCalls.map((toolCall) => toolCall.toolName),
         toolResults: event.toolResults.map((toolResult) => toolResult.toolName),
       }))
+    },
+    onStepStart: (event) => {
+      if (event.stepNumber === 0) progress?.waiting(event.stepNumber)
+      else progress?.composing(event.stepNumber)
+    },
+    onChunk: ({ chunk }) => {
+      if (chunk.type === "text-start") progress?.composing(0)
     },
     onEnd: wrappedOnEnd,
   })

@@ -2,9 +2,9 @@ import { useRef, useEffect, useLayoutEffect, useState, Suspense } from "react"
 import { useMutation } from "@tanstack/react-query"
 import { useAgent } from "agents/react"
 import { useAgentChat } from "@cloudflare/ai-chat/react"
-import { AlertCircle, ArrowUp, Brain, CheckCircle2, ChevronDown, Loader2, RotateCcw, Square } from "lucide-react"
+import { AlertCircle, ArrowUp, CheckCircle2, ChevronDown, Loader2, RotateCcw, Square } from "lucide-react"
 import { Streamdown, type Components } from "streamdown"
-import type { ChatMessage } from "@/agent/chat-message"
+import type { ChatMessage, ChatProgressEvent } from "@/agent/chat-message"
 import { ArtifactBlock, ArtifactView, parseArtifact, type AnalysisArtifact } from "@/components/artifacts/analysis-artifacts"
 import {
   InputGroup,
@@ -13,7 +13,14 @@ import {
   InputGroupTextarea,
 } from "@/components/ui/input-group"
 import { cn } from "@/lib/utils"
-import { isNormalizedToolFailure, toolDisplayRegistry, toolResultMessage } from "@/agent/tool-display"
+import {
+  isNormalizedToolFailure,
+  toolDisplayRegistry,
+  toolLabel,
+  toolLoadingMessage,
+  toolResultMessage,
+} from "@/agent/tool-display"
+import { isChatProgressEvent, reduceChatProgressEvents } from "@/agent/chat-progress"
 import {
   TableBody,
   TableCell,
@@ -449,12 +456,8 @@ function toolPartRow(part: AnyPart) {
   const normalizedFailure = p.state === "output-available" && isNormalizedToolFailure(p.output)
   const isDone = p.state === "output-available" && !normalizedFailure
   const isError = p.state === "output-error" || normalizedFailure
-  const label = display?.label ?? toolName
-  const loadingMsg =
-    display == null ? `Running ${toolName}…`
-    : typeof display.loadingMessage === "function"
-    ? display.loadingMessage((p.input ?? {}) as Record<string, unknown>)
-    : display.loadingMessage
+  const label = toolLabel(toolName)
+  const loadingMsg = toolLoadingMessage(toolName, p.input)
   const resultMsg = p.state === "output-available" ? toolResultMessage(display, p.output) : null
   const errorText = normalizedFailure ? resultMsg : isError ? (p as { errorText?: string }).errorText : undefined
   return { isLoading, isDone, isError, label, loadingMsg, resultMsg, errorText }
@@ -521,29 +524,6 @@ const richResultRenderers: Record<string, (output: unknown) => React.ReactNode> 
 }
 
 function RailRow({ part }: { part: AnyPart }) {
-  if (part.type === "reasoning") {
-    const text = (part as { text?: string }).text ?? ""
-    return (
-      <div className="text-muted-foreground flex min-w-0 items-center gap-2">
-        <RailNode><Brain className="size-3" /></RailNode>
-        <span className="text-foreground shrink-0 font-medium">Thinking</span>
-        <span className="shrink-0 opacity-40">·</span>
-        <span className="min-w-0 flex-1 truncate">{text || "…"}</span>
-      </div>
-    )
-  }
-
-  if (part.type === "reasoning-file") {
-    return (
-      <div className="text-muted-foreground flex min-w-0 items-center gap-2">
-        <RailNode><Brain className="size-3" /></RailNode>
-        <span className="text-foreground shrink-0 font-medium">Reasoning attachment</span>
-        <span className="shrink-0 opacity-40">·</span>
-        <span className="min-w-0 flex-1 truncate">{part.mediaType}</span>
-      </div>
-    )
-  }
-
   if (part.type.startsWith("tool-") || part.type === "dynamic-tool") {
     const toolName = toolNameForPart(part)
     const { isLoading, isDone, isError, label, loadingMsg, resultMsg, errorText } = toolPartRow(part)
@@ -565,6 +545,62 @@ function RailRow({ part }: { part: AnyPart }) {
   }
 
   return null
+}
+
+function ProgressRow({ event }: { event: ChatProgressEvent }) {
+  const isActive = event.status === "active"
+  const isError = event.status === "failed"
+  return (
+    <div className={cn("flex min-w-0 items-center gap-2", isError ? "text-destructive" : "text-muted-foreground")}>
+      <RailNode>
+        {isActive && <Loader2 className="size-3 animate-spin" />}
+        {event.status === "completed" && <CheckCircle2 className="size-3 text-green-500" />}
+        {event.status === "cancelled" && <Square className="size-3 fill-current" />}
+        {isError && <AlertCircle className="size-3 text-destructive" />}
+      </RailNode>
+      <span className="text-foreground shrink-0 font-medium">{event.label}</span>
+      <span className="shrink-0 opacity-40">·</span>
+      <span className="min-w-0 flex-1 truncate">{event.message}</span>
+    </div>
+  )
+}
+
+function ProgressRail({ events, isStreaming }: { events: Array<ChatProgressEvent>; isStreaming: boolean }) {
+  const [override, setOverride] = useState<boolean | null>(null)
+  const state = reduceChatProgressEvents(events)
+  const active = state.terminalStatus === null && isStreaming
+  const open = override ?? active
+  const activeRow = [...state.rows].reverse().find((row) => row.status === "active")
+  const summary = active
+    ? activeRow?.message ?? "Working…"
+    : state.terminalStatus === "cancelled"
+    ? "Stopped"
+    : state.terminalStatus === "failed"
+    ? "Response failed"
+    : state.terminalStatus === null
+    ? "Response interrupted"
+    : "Work complete"
+  const displayStatus = state.terminalStatus ?? (active ? "active" : "interrupted")
+
+  return (
+    <div className="w-full text-xs" data-chat-progress={displayStatus}>
+      <button
+        type="button"
+        onClick={() => setOverride(!open)}
+        className="text-muted-foreground hover:text-foreground flex items-center gap-2 transition-colors"
+      >
+        {active ? <Loader2 className="size-3 shrink-0 animate-spin" /> : state.terminalStatus === "completed" ? <CheckCircle2 className="size-3 shrink-0" /> : state.terminalStatus === "cancelled" ? <Square className="size-3 shrink-0 fill-current" /> : <AlertCircle className="size-3 shrink-0 text-destructive" />}
+        <span className="font-medium">{summary}</span>
+        <ChevronDown className={cn("size-3 transition-transform", open && "rotate-180")} />
+      </button>
+      {open && state.rows.length > 0 && (
+        <div className="relative mt-2 space-y-2.5">
+          <div className="bg-border absolute left-2 top-2 bottom-2 w-px" aria-hidden />
+          {state.rows.map((row) => <ProgressRow key={row.activityId} event={row} />)}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function IntermediateRail({ parts, isStreaming, isLast }: { parts: AnyPart[]; isStreaming: boolean; isLast: boolean }) {
@@ -640,7 +676,7 @@ function LifecycleNotice({ state, error, onRetry }: { state: ChatLifecycleState;
   )
 }
 
-function Message({ message, isStreaming }: { message: ChatMessage; isStreaming: boolean }) {
+export function Message({ message, isStreaming }: { message: ChatMessage; isStreaming: boolean }) {
   if (message.role === "user") {
     const textPart = message.parts.find((p) => p.type === "text") as { text?: string } | undefined
     return (
@@ -657,15 +693,33 @@ function Message({ message, isStreaming }: { message: ChatMessage; isStreaming: 
   const artifacts = extractAnalysisArtifacts(message)
   const renderedArtifactIds = new Set<string>()
 
-  type Block = { kind: "rail"; parts: AnyPart[] } | { kind: "text"; text: string }
-  const blocks: Block[] = []
+  const progressEvents = message.parts
+    .filter((part) => part.type === "data-chat-progress")
+    .map((part) => part.data)
+    .filter(isChatProgressEvent)
+  const hasProgress = progressEvents.length > 0
+
+  type Block =
+    | { kind: "progress"; events: Array<ChatProgressEvent> }
+    | { kind: "rail"; parts: Array<AnyPart> }
+    | { kind: "text"; text: string }
+  const blocks: Array<Block> = []
+  let progressAdded = false
   for (const part of message.parts) {
     if (part.type === "step-start") continue
+    if (part.type === "data-chat-progress") {
+      if (!progressAdded && hasProgress) {
+        blocks.push({ kind: "progress", events: progressEvents })
+        progressAdded = true
+      }
+      continue
+    }
     if (part.type === "text") {
       blocks.push({ kind: "text", text: (part as { text?: string }).text ?? "" })
       continue
     }
-    if (part.type === "reasoning" || part.type === "reasoning-file" || part.type.startsWith("tool-") || part.type === "dynamic-tool") {
+    if (part.type === "reasoning" || part.type === "reasoning-file") continue
+    if (!hasProgress && (part.type.startsWith("tool-") || part.type === "dynamic-tool")) {
       const last = blocks[blocks.length - 1]
       if (last && last.kind === "rail") last.parts.push(part)
       else blocks.push({ kind: "rail", parts: [part] })
@@ -676,6 +730,9 @@ function Message({ message, isStreaming }: { message: ChatMessage; isStreaming: 
     <div className="flex flex-col items-start gap-5">
       {blocks.map((block, i) => {
         const isLastBlock = i === blocks.length - 1
+        if (block.kind === "progress") {
+          return <ProgressRail key="chat-progress" events={block.events} isStreaming={isStreaming} />
+        }
         if (block.kind === "rail") {
           return <IntermediateRail key={i} parts={block.parts} isStreaming={isStreaming} isLast={isLastBlock} />
         }
