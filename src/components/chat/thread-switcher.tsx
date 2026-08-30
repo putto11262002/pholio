@@ -7,6 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { cn } from "@/lib/utils"
 import { listThreadsFn, deleteThreadFn } from "@/thread/functions"
 import type { Thread } from "@/thread/types"
+import { discardPendingInitialMessage } from "@/components/chat/chat-initial-message"
 
 type SidebarProps = {
   open: boolean
@@ -35,6 +36,7 @@ export function ConversationSidebar({ open, onClose, userId, activeThreadId, onS
   const deleteMutation = useMutation({
     mutationFn: (threadId: string) => deleteThreadFn({ data: { id: threadId } }),
     onSuccess: (_data, threadId) => {
+      discardPendingInitialMessage(localStorage, threadId)
       qc.invalidateQueries({ queryKey: ["threads", userId] })
       if (threadId === activeThreadId) {
         const remaining = threads.filter((t) => t.id !== threadId)

@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ChatMessage } from "@/agent/chat-message"
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((settle) => { resolve = settle })
+  return { promise, resolve }
+}
 
 const hook = vi.hoisted(() => ({
   options: null as null | {
@@ -19,11 +25,18 @@ const hook = vi.hoisted(() => ({
 const agent = vi.hoisted(() => ({
   connectionError: null,
   reconnect: vi.fn(),
+  call: vi.fn(async (): Promise<{ status: "stable" | "timeout" | "unavailable" }> => ({ status: "stable" })),
 }))
 
-vi.mock("agents/react", () => ({
-  useAgent: () => agent,
-}))
+vi.mock("agents/react", async () => {
+  const { useEffect } = await import("react")
+  return {
+    useAgent: (options: { onOpen?: () => void }) => {
+      useEffect(() => { options.onOpen?.() }, [options.onOpen])
+      return agent
+    },
+  }
+})
 
 vi.mock("@cloudflare/ai-chat/react", () => ({
   useAgentChat: (options: typeof hook.options) => {
@@ -42,7 +55,11 @@ const userMessage = {
 } as ChatMessage
 
 function renderConnectedChat() {
-  return render(
+  return render(connectedChatElement())
+}
+
+function connectedChatElement() {
+  return (
     <ConnectedChat
       threadId="thread-1"
       modelKey="flash"
@@ -51,7 +68,7 @@ function renderConnectedChat() {
       onModelSelect={() => undefined}
       onThinkingSelect={() => undefined}
       onAutoTitle={() => undefined}
-    />,
+    />
   )
 }
 
@@ -94,10 +111,9 @@ describe("ConnectedChat cancellation", () => {
     expect((screen.getByRole("button", { name: "Stopping response" }) as HTMLButtonElement).disabled).toBe(true)
     expect((screen.getByPlaceholderText("Ask about your portfolio…") as HTMLTextAreaElement).disabled).toBe(true)
 
-    await act(async () => {
-      await stop.mock.results[0]?.value
-    })
+    await act(async () => { await stop.mock.results[0]?.value })
 
+    expect(agent.call).toHaveBeenCalledWith("waitForTurnSettlement", [], { timeout: 12_000 })
     expect(screen.getByText("Stopping…")).toBeTruthy()
     expect(screen.queryByText("Cancelled — partial response kept.")).toBeNull()
 
@@ -156,11 +172,14 @@ describe("ConnectedChat cancellation", () => {
       role: "assistant",
       parts: [{ type: "text", text: "Late answer" }],
     } as ChatMessage
-    act(() => hook.options?.onFinish({
-      message: assistantMessage,
-      messages: [userMessage, assistantMessage],
-      isAbort: true,
-    }))
+    await act(async () => {
+      hook.options?.onFinish({
+        message: assistantMessage,
+        messages: [userMessage, assistantMessage],
+        isAbort: true,
+      })
+      await (hook.state.stop as ReturnType<typeof vi.fn>).mock.results[0]?.value
+    })
 
     expect(screen.getByText("Cancelled — partial response kept.")).toBeTruthy()
 
@@ -169,6 +188,116 @@ describe("ConnectedChat cancellation", () => {
       messages: [userMessage, assistantMessage],
       isAbort: false,
     }))
+
+    expect(screen.getByText("Cancelled — partial response kept.")).toBeTruthy()
+    expect(screen.queryByText("Complete")).toBeNull()
+  })
+
+  it("keeps input disabled and surfaces recovery when settlement times out", async () => {
+    agent.call.mockResolvedValueOnce({ status: "timeout" })
+    renderConnectedChat()
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop response" }))
+    const emptyAssistant = { id: "assistant-empty", role: "assistant", parts: [] } as ChatMessage
+    await act(async () => {
+      hook.options?.onFinish({ message: emptyAssistant, messages: [emptyAssistant], isAbort: true })
+      await (hook.state.stop as ReturnType<typeof vi.fn>).mock.results[0]?.value
+    })
+
+    expect(screen.getByRole("alert").textContent).toContain("server is still stopping")
+    expect(screen.queryByText("Cancelled — partial response kept.")).toBeNull()
+    expect((screen.getByPlaceholderText("Ask about your portfolio…") as HTMLTextAreaElement).disabled).toBe(true)
+    expect(screen.getByRole("button", { name: /Try stop again/ })).toBeTruthy()
+  })
+
+  it("holds a racing normal finish until the server settlement barrier resolves", async () => {
+    const settlement = deferred<{ status: "stable" | "timeout" | "unavailable" }>()
+    agent.call.mockReturnValueOnce(settlement.promise)
+    hook.state = { ...hook.state, status: "ready", isStreaming: true }
+    const view = renderConnectedChat()
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop response" }))
+    const assistantMessage = {
+      id: "assistant-normal-finish",
+      role: "assistant",
+      parts: [{ type: "text", text: "Finished at the boundary" }],
+    } as ChatMessage
+    act(() => hook.options?.onFinish({
+      message: assistantMessage,
+      messages: [userMessage, assistantMessage],
+      isAbort: false,
+    }))
+    hook.state = { ...hook.state, status: "ready", isStreaming: false }
+    view.rerender(connectedChatElement())
+
+    expect(screen.getByText("Stopping…")).toBeTruthy()
+    expect((screen.getByPlaceholderText("Ask about your portfolio…") as HTMLTextAreaElement).disabled).toBe(true)
+
+    await act(async () => { settlement.resolve({ status: "stable" }); await settlement.promise })
+
+    await waitFor(() => expect(screen.getByText("Complete")).toBeTruthy())
+    expect((screen.getByPlaceholderText("Ask about your portfolio…") as HTMLTextAreaElement).disabled).toBe(false)
+  })
+
+  it("preserves a normal finish recorded just before a stale Stop click", async () => {
+    hook.state = { ...hook.state, status: "streaming", isStreaming: true }
+    renderConnectedChat()
+    const assistantMessage = {
+      id: "assistant-already-finished",
+      role: "assistant",
+      parts: [{ type: "text", text: "Already finished" }],
+    } as ChatMessage
+
+    act(() => hook.options?.onFinish({
+      message: assistantMessage,
+      messages: [userMessage, assistantMessage],
+      isAbort: false,
+    }))
+    fireEvent.click(screen.getByRole("button", { name: "Stop response" }))
+    hook.state = { ...hook.state, status: "ready", isStreaming: false }
+
+    await waitFor(() => expect(screen.getByText("Complete")).toBeTruthy())
+    expect(agent.call).toHaveBeenCalledWith("waitForTurnSettlement", [], { timeout: 12_000 })
+    expect((screen.getByPlaceholderText("Ask about your portfolio…") as HTMLTextAreaElement).disabled).toBe(false)
+  })
+
+  it("cancels a bridged continuation instead of preserving the original completion", async () => {
+    hook.state = { ...hook.state, status: "streaming", isStreaming: true, isToolContinuation: false }
+    const view = renderConnectedChat()
+
+    hook.state = { ...hook.state, isToolContinuation: true }
+    view.rerender(connectedChatElement())
+    const originalAssistant = {
+      id: "assistant-original-finish",
+      role: "assistant",
+      parts: [{ type: "text", text: "Original stream finished" }],
+    } as ChatMessage
+    act(() => hook.options?.onFinish({
+      message: originalAssistant,
+      messages: [userMessage, originalAssistant],
+      isAbort: false,
+    }))
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop response" }))
+    await waitFor(() => expect(agent.call).toHaveBeenCalledWith(
+      "waitForTurnSettlement",
+      [],
+      { timeout: 12_000 },
+    ))
+    expect(screen.getByText("Stopping…")).toBeTruthy()
+
+    const abortedContinuation = {
+      id: "assistant-continuation-abort",
+      role: "assistant",
+      parts: [],
+    } as ChatMessage
+    act(() => hook.options?.onFinish({
+      message: abortedContinuation,
+      messages: [userMessage, abortedContinuation],
+      isAbort: true,
+    }))
+    hook.state = { ...hook.state, status: "ready", isStreaming: false, isToolContinuation: false }
+    view.rerender(connectedChatElement())
 
     expect(screen.getByText("Cancelled — partial response kept.")).toBeTruthy()
     expect(screen.queryByText("Complete")).toBeNull()

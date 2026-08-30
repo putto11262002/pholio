@@ -5,6 +5,7 @@ import { useAgentChat } from "@cloudflare/ai-chat/react"
 import { AlertCircle, ArrowUp, CheckCircle2, ChevronDown, Loader2, RotateCcw, Square } from "lucide-react"
 import { Streamdown, type Components } from "streamdown"
 import type { ChatMessage, ChatProgressEvent } from "@/agent/chat-message"
+import type { ChatSettlementResult } from "@/agent/chat-settlement"
 import { ArtifactBlock, ArtifactView, parseArtifact, type AnalysisArtifact } from "@/components/artifacts/analysis-artifacts"
 import {
   InputGroup,
@@ -46,15 +47,17 @@ import { prependThreadToInfiniteData, type ThreadPage } from "@/thread/cache"
 import {
   beginTurn,
   cancelTurn as cancelTurnGeneration,
+  clearTurnCompletion,
   completeTurn as completeTurnGeneration,
+  continueTurn,
   createSelectionIntentTracker,
   createTurnGenerationQueue,
-  failTurnCancellation,
   initialTurnGenerationState,
   latestTurnGeneration,
   resolveChatLifecycle,
   requestTurnCancellation,
   retryTurn,
+  settleTurnCancellation,
   turnGenerationForFinishedMessage,
   type ChatConnectionState,
   type ChatLifecycleState,
@@ -63,7 +66,7 @@ import {
   beginDraftCreation,
   chatSessionKey,
   initialChatSelection,
-  markInitialMessageDispatched,
+  markInitialMessageObserved,
   selectNewDraft,
   selectPersistedThread,
   settleDraftCreation,
@@ -72,6 +75,12 @@ import {
   updateSelectionTitle,
   type ChatSelection,
 } from "@/components/chat/chat-selection"
+import {
+  clearPendingInitialMessage,
+  readPendingInitialMessage,
+  writePendingInitialMessage,
+  type PendingInitialMessage,
+} from "@/components/chat/chat-initial-message"
 
 const THREAD_LS_KEY = "activeThreadId"
 
@@ -672,6 +681,16 @@ function LifecycleNotice({ state, error, onRetry }: { state: ChatLifecycleState;
     cancelled: "Cancelled — partial response kept.",
   }
   if (state === "idle") return null
+  if (state === "stopping" && error) {
+    return (
+      <div className="bg-destructive/10 text-destructive flex items-center justify-between gap-3 rounded-2xl px-3 py-2 text-xs" role="alert">
+        <span className="min-w-0">{error}</span>
+        <button type="button" onClick={onRetry} className="hover:bg-destructive/10 flex shrink-0 items-center gap-1 rounded-full px-2 py-1 font-medium">
+          <RotateCcw className="size-3" /> Try stop again
+        </button>
+      </div>
+    )
+  }
   if (state === "failed") {
     return (
       <div className="bg-destructive/10 text-destructive flex items-center justify-between gap-3 rounded-2xl px-3 py-2 text-xs" role="alert">
@@ -783,8 +802,8 @@ type ConnectedChatProps = {
   modelKey: GeneralChatModelKey
   providerOptions: ProviderOptions
   activeTitle: string | null
-  initialMessage?: string | null
-  onInitialMessageSent?: () => void
+  initialMessage?: PendingInitialMessage | null
+  onInitialMessageObserved?: (messageId: string) => void
   onModelSelect: (key: GeneralChatModelKey) => void
   onThinkingSelect: (opts: ProviderOptions) => void
   onAutoTitle: (title: string) => void
@@ -792,7 +811,7 @@ type ConnectedChatProps = {
 
 export function ConnectedChat({
   threadId, modelKey, providerOptions, activeTitle,
-  initialMessage, onInitialMessageSent,
+  initialMessage, onInitialMessageObserved,
   onModelSelect, onThinkingSelect, onAutoTitle,
 }: ConnectedChatProps) {
   const lastPairRef = useRef<HTMLDivElement>(null)
@@ -806,9 +825,11 @@ export function ConnectedChat({
   const [input, setInput] = useState("")
   const [modelOpen, setModelOpen] = useState(false)
   const [connectionState, setConnectionState] = useState<ChatConnectionState>("connecting")
+  const [cancellationError, setCancellationError] = useState<string | null>(null)
   const [turnState, setTurnState] = useState(initialTurnGenerationState)
   const turnStateRef = useRef(initialTurnGenerationState)
   const turnCompletionQueueRef = useRef(createTurnGenerationQueue())
+  const wasHookBusyRef = useRef(false)
 
   function transitionTurn(update: (state: typeof initialTurnGenerationState) => typeof initialTurnGenerationState) {
     const next = update(turnStateRef.current)
@@ -846,6 +867,12 @@ export function ConnectedChat({
     cancelOnClientAbort: false,
     body: () => ({ modelKey, providerOptions }),
     onFinish: ({ message, messages: finishedMessages, isAbort }) => {
+      if (
+        initialMessage
+        && finishedMessages.some((finished) => finished.role === "user" && finished.id === initialMessage.id)
+      ) {
+        onInitialMessageObserved?.(initialMessage.id)
+      }
       const generationFromMessage = turnGenerationForFinishedMessage(message.id, finishedMessages)
       const generationFromQueue = turnCompletionQueueRef.current.resolve(generationFromMessage)
       const current = turnStateRef.current
@@ -855,7 +882,9 @@ export function ConnectedChat({
       if (generation === undefined) return
       transitionTurn((current) => isAbort
         ? cancelTurnGeneration(current, generation)
-        : completeTurnGeneration(current, generation))
+        : isToolContinuation
+          ? clearTurnCompletion(current, generation)
+          : completeTurnGeneration(current, generation))
     },
   })
 
@@ -872,11 +901,32 @@ export function ConnectedChat({
     status === "submitted" || status === "streaming" || isStreaming || isRecovering || isToolContinuation
   ))
 
+  const isHookBusy = status === "submitted" || status === "streaming"
+    || isStreaming || isRecovering || isToolContinuation
+  useEffect(() => {
+    const startedAfterIdle = isHookBusy && !wasHookBusyRef.current
+    wasHookBusyRef.current = isHookBusy
+    const current = turnStateRef.current
+    if ((startedAfterIdle || isToolContinuation) && current.completed === current.current) {
+      transitionTurn(isToolContinuation
+        ? (state) => clearTurnCompletion(state, state.current)
+        : continueTurn)
+    }
+  }, [isHookBusy, isToolContinuation])
+
   useEffect(() => {
     if (turnStateRef.current.current > 0) return
     const persistedGeneration = latestTurnGeneration(messages)
     if (persistedGeneration !== undefined) {
-      transitionTurn(() => ({ current: persistedGeneration, stopping: null, cancelled: null, completed: null }))
+      transitionTurn(() => ({
+        current: persistedGeneration,
+        stopping: null,
+        abortAcknowledged: null,
+        completionAcknowledged: null,
+        serverSettled: null,
+        cancelled: null,
+        completed: null,
+      }))
       return
     }
     if (isStreaming || isRecovering || isToolContinuation || status === "submitted" || status === "streaming") {
@@ -910,16 +960,38 @@ export function ConnectedChat({
     }
   }, [messages])
 
-  // Send queued first message exactly once on mount (ref guards against Strict Mode double-invoke)
+  // Initial messages are hydrated before this component leaves Suspense. If the
+  // durable handoff is already present, acknowledge it without sending again.
   const hasSentInitialRef = useRef(false)
   useEffect(() => {
     if (!initialMessage || hasSentInitialRef.current) return
+    if (messages.some((message) => message.role === "user" && message.id === initialMessage.id)) {
+      onInitialMessageObserved?.(initialMessage.id)
+      return
+    }
     hasSentInitialRef.current = true
     const turnGeneration = startTurn()
-    sendMessage({ text: initialMessage, metadata: { turnGeneration } })
-    onInitialMessageSent?.()
+    void sendMessage({
+      id: initialMessage.id,
+      role: "user",
+      parts: [{ type: "text", text: initialMessage.text }],
+      metadata: { turnGeneration },
+    })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // The user message is optimistic locally, so its presence alone is not an
+  // acknowledgement. Clear the durable handoff only once the Agent starts a
+  // response (or the hook finishes one) and the exact stable id is present.
+  const initialMessageId = initialMessage?.id
+  const initialMessageAccepted = Boolean(initialMessageId)
+    && messages.some((message) => message.role === "user" && message.id === initialMessageId)
+    && (status === "streaming" || isStreaming || isRecovering || isToolContinuation)
+  useEffect(() => {
+    if (initialMessage && initialMessageAccepted) {
+      onInitialMessageObserved?.(initialMessage.id)
+    }
+  }, [initialMessage, initialMessageAccepted, onInitialMessageObserved])
 
   // Refocus textarea when streaming ends
   useEffect(() => {
@@ -971,12 +1043,28 @@ export function ConnectedChat({
 
   async function cancelTurn() {
     const generation = turnStateRef.current.current
-    const requested = transitionTurn((current) => requestTurnCancellation(current, generation))
+    const requested = transitionTurn((current) => requestTurnCancellation(
+      isToolContinuation ? clearTurnCompletion(current, generation) : current,
+      generation,
+    ))
     if (requested.stopping !== generation) return
+    setCancellationError(null)
     try {
       await stop()
+      const settlement = await agent.call<ChatSettlementResult>(
+        "waitForTurnSettlement",
+        [],
+        { timeout: 12_000 },
+      )
+      if (settlement.status === "stable") {
+        transitionTurn((current) => settleTurnCancellation(current, generation))
+        return
+      }
+      setCancellationError(settlement.status === "timeout"
+        ? "The server is still stopping this response. Try again before sending another message."
+        : "Could not confirm that the response stopped. Check the connection and try again.")
     } catch {
-      transitionTurn((current) => failTurnCancellation(current, generation))
+      setCancellationError("Could not confirm that the response stopped. Check the connection and try again.")
     }
   }
 
@@ -1047,7 +1135,11 @@ export function ConnectedChat({
       {/* Floating input */}
       <div ref={floatingRef} className="absolute bottom-4 left-4 right-4 pointer-events-none flex flex-col gap-1.5">
         <div className="pointer-events-auto">
-          <LifecycleNotice state={lifecycle} error={error?.message ?? connectionError?.message} onRetry={retry} />
+          <LifecycleNotice
+            state={lifecycle}
+            error={cancellationError ?? error?.message ?? connectionError?.message}
+            onRetry={cancellationError ? cancelTurn : retry}
+          />
         </div>
         <div className="pointer-events-auto">
           <InputGroup className="border-primary bg-background/80 backdrop-blur-sm shadow-xl ring-1 ring-primary/30 has-[[data-slot=input-group-control]:focus-visible]:border-primary has-[[data-slot=input-group-control]:focus-visible]:ring-primary/30">
@@ -1292,7 +1384,7 @@ export function ChatPanel() {
   const selectionIntentRef = useRef(createSelectionIntentTracker())
 
   const createMutation = useMutation({
-    mutationFn: (creation: { intent: number; text: string; modelKey: GeneralChatModelKey; providerOptions: ProviderOptions }) =>
+    mutationFn: (creation: { intent: number; message: PendingInitialMessage; modelKey: GeneralChatModelKey; providerOptions: ProviderOptions }) =>
       createThreadFn({ data: { modelKey: creation.modelKey, providerOptions: creation.providerOptions } }),
     onSuccess: (created, creation) => {
       const queryKey = ["threads", userId ?? ""] as const
@@ -1301,11 +1393,12 @@ export function ChatPanel() {
         (current: InfiniteData<ThreadPage, string | undefined> | undefined) =>
           prependThreadToInfiniteData(current, created),
       )
+      writePendingInitialMessage(localStorage, created.id, creation.message)
       if (selectionIntentRef.current.isCurrent(creation.intent)) {
         setSelection((current) => selectPersistedThread(current, {
           ...created,
           modelKey: resolveGeneralChatModelKey(created.modelKey),
-        }, creation.text))
+        }, creation.message))
         localStorage.setItem(THREAD_LS_KEY, created.id)
       }
       void queryClient.invalidateQueries({ queryKey })
@@ -1321,12 +1414,14 @@ export function ChatPanel() {
 
   // Init — restore last thread if available, otherwise show empty (no server call)
   useEffect(() => {
+    let cancelled = false
     const restoreIntent = selectionIntentRef.current.capture()
+    const isActiveRestore = () => !cancelled && selectionIntentRef.current.isCurrent(restoreIntent)
     const stored = localStorage.getItem(THREAD_LS_KEY)
     if (stored) {
       getThreadFn({ data: { id: stored } })
         .then((t) => {
-          if (!selectionIntentRef.current.isCurrent(restoreIntent)) return
+          if (!isActiveRestore()) return
           if (t) {
             const resolvedModelKey = resolveGeneralChatModelKey(t.modelKey)
             setSelection((current) => selectPersistedThread(current, {
@@ -1334,19 +1429,22 @@ export function ChatPanel() {
               title: t.title ?? null,
               modelKey: resolvedModelKey,
               providerOptions: {},
-            }))
+            }, readPendingInitialMessage(localStorage, t.id)))
             localStorage.setItem(THREAD_LS_KEY, t.id)
           } else {
             localStorage.removeItem(THREAD_LS_KEY)
           }
         })
         .catch(() => {
-          if (selectionIntentRef.current.isCurrent(restoreIntent)) localStorage.removeItem(THREAD_LS_KEY)
+          if (isActiveRestore()) localStorage.removeItem(THREAD_LS_KEY)
         })
-        .finally(() => setInitialized(true))
+        .finally(() => {
+          if (isActiveRestore()) setInitialized(true)
+        })
     } else {
       setInitialized(true)
     }
+    return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -1358,7 +1456,7 @@ export function ChatPanel() {
       title: t.title ?? null,
       modelKey: resolvedModelKey,
       providerOptions: {},
-    }))
+    }, readPendingInitialMessage(localStorage, t.id)))
     localStorage.setItem(THREAD_LS_KEY, t.id)
   }
 
@@ -1394,7 +1492,7 @@ export function ChatPanel() {
     setSelection((current) => beginDraftCreation(current, intent))
     createMutation.mutate({
       intent,
-      text,
+      message: { id: crypto.randomUUID(), text },
       modelKey: selection.modelKey,
       providerOptions: selection.providerOptions,
     })
@@ -1438,11 +1536,14 @@ export function ChatPanel() {
             providerOptions={selection.providerOptions}
             activeTitle={selection.title}
             initialMessage={selection.initialMessage}
-            onInitialMessageSent={() => setSelection((current) => markInitialMessageDispatched(
-              current,
-              selection.version,
-              selection.threadId,
-            ))}
+            onInitialMessageObserved={(messageId) => {
+              clearPendingInitialMessage(localStorage, selection.threadId, messageId)
+              setSelection((current) => markInitialMessageObserved(
+                current,
+                selection.version,
+                selection.threadId,
+              ))
+            }}
             onModelSelect={handleModelSelect}
             onThinkingSelect={handleThinkingSelect}
             onAutoTitle={(title) => handleAutoTitle(selection.version, selection.threadId, title)}

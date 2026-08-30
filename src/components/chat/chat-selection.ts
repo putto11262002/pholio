@@ -3,6 +3,7 @@ import {
   type GeneralChatModelKey,
   type ProviderOptions,
 } from "@/agent/general-chat-models"
+import type { PendingInitialMessage } from "@/components/chat/chat-initial-message"
 
 type SelectionBase = {
   version: number
@@ -19,7 +20,7 @@ export type PersistedChatSelection = SelectionBase & {
   kind: "thread"
   threadId: string
   title: string | null
-  initialMessage: string | null
+  initialMessage: PendingInitialMessage | null
 }
 
 export type ChatSelection = DraftChatSelection | PersistedChatSelection
@@ -56,7 +57,7 @@ export function selectPersistedThread(
     modelKey: GeneralChatModelKey
     providerOptions?: ProviderOptions
   },
-  initialMessage: string | null = null
+  initialMessage: PendingInitialMessage | null = null
 ): PersistedChatSelection {
   return {
     kind: "thread",
@@ -101,7 +102,7 @@ export function updateSelectionThinking(
   return { ...current, providerOptions }
 }
 
-export function markInitialMessageDispatched(
+export function markInitialMessageObserved(
   current: ChatSelection,
   version: number,
   threadId: string
