@@ -8,7 +8,7 @@ import { cloudflare } from "@cloudflare/vite-plugin"
 
 const config = defineConfig({
   server: {
-    allowedHosts: ["pholio-dev.sabaiscale.com", "host.docker.internal"],
+    allowedHosts: ["dev.pholio.markets", "host.docker.internal"],
   },
   plugins: [
     devtools(),
