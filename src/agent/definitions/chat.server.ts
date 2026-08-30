@@ -11,6 +11,7 @@ import { createResearchTools } from "@/agent/tools/research.server"
 import { skillTools } from "@/agent/tools/skills.server"
 import { stockTools } from "@/agent/tools/stock.server"
 import { createToolErrorTransform, sanitizeToolErrorMessage, ToolFailureTracker } from "@/agent/tools/errors.server"
+import { withJsonSafeToolOutputs } from "@/agent/tools/json-safe.server"
 import { buildAiRun, getMonthlyLimitUsd, getMonthlySpend, insertAiRun } from "@/agent/usage/api.server"
 import type { ChatProgressCallbacks } from "@/agent/runtime/chat-progress.server"
 
@@ -98,18 +99,18 @@ export async function runChatAgent({
 
   const modelKey = resolveGeneralChatModelKey(modelKeyOpt)
   const modelId = generalChatModels[modelKey].id
-  const modelMessages = await convertToModelMessages(messages)
   const skills = await listAgentSkills()
   const researchTools = createResearchTools()
   const startedAt = Date.now()
   const baseInstructions = renderSystemPrompt(skills)
-  const tools = {
+  const tools = withJsonSafeToolOutputs({
     ...skillTools,
     ...createPortfolioTools(userId),
     ...stockTools,
     ...researchTools,
     ...createAnalysisTools(userId, threadId, ({ toolCallId, phase }) => progress?.analysisPhase(toolCallId, phase), defer),
-  }
+  })
+  const modelMessages = await convertToModelMessages(messages, { tools })
   const toolNames = Object.keys(tools) as Array<keyof typeof tools & string>
   const failureTracker = new ToolFailureTracker()
 
