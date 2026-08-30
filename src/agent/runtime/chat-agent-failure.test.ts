@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock("@cloudflare/ai-chat", () => ({ AIChatAgent: class {} }))
+vi.mock("agents", () => ({ callable: () => <T>(method: T) => method }))
 vi.mock("@/agent/definitions/chat.server", () => ({ runChatAgent: mocks.runChatAgent }))
 vi.mock("@/thread/api.server", () => ({ getThreadOwnerUserId: mocks.getThreadOwnerUserId }))
 

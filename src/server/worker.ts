@@ -1,10 +1,10 @@
 import { count } from "drizzle-orm"
 import handler from "@tanstack/react-start/server-entry"
-import { routeAgentRequest } from "agents"
 import { Webhook } from "svix"
 export { ChatAgent } from "@/agent/runtime/chat-agent.server"
 export { AnalysisSandbox } from "@/agent/runtime/analysis-sandbox.server"
 import { handleSandboxApi } from "@/agent/sandbox/api.server"
+import { routeAuthenticatedAgentRequest } from "@/server/agent-routing.server"
 import { getDb } from "@/db/index.server"
 import { trade } from "@/db/schema"
 import { upsertUser, deleteUser } from "@/user/api.server"
@@ -123,7 +123,7 @@ export default {
       }
     }
 
-    const agentRes = await routeAgentRequest(request, env as Env)
+    const agentRes = await routeAuthenticatedAgentRequest(request, env as Env)
     if (agentRes) return agentRes
 
     return handler.fetch(request)

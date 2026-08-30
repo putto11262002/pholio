@@ -2,8 +2,12 @@ import { AIChatAgent } from "@cloudflare/ai-chat"
 import { createUIMessageStream, createUIMessageStreamResponse, toUIMessageStream } from "ai"
 import type { GenerateTextOnEndCallback, ToolSet } from "ai"
 import type { OnChatMessageOptions } from "@cloudflare/ai-chat"
-import { verifyToken } from "@clerk/backend"
+import { callable } from "agents"
 import type { ChatMessage } from "@/agent/chat-message"
+import {
+  CHAT_SETTLEMENT_TIMEOUT_MS,
+  type ChatSettlementResult,
+} from "@/agent/chat-settlement"
 import { runChatAgent } from "@/agent/definitions/chat.server"
 import type { GeneralChatModelKey } from "@/agent/general-chat-models"
 import { MISSING_STREAM_ERROR } from "@/agent/tools/errors.server"
@@ -14,12 +18,24 @@ import {
   settleChatProgress,
 } from "@/agent/runtime/chat-progress.server"
 import { createChatTurnDiagnostics } from "@/agent/runtime/chat-failure.server"
+import { authorizeChatAgentRequest } from "@/agent/runtime/chat-agent-auth.server"
 
 export class ChatAgent extends AIChatAgent<Env> {
   private async getThreadUserId(): Promise<string> {
     const userId = await getThreadOwnerUserId(this.name)
     if (!userId) throw new Error("Thread not found")
     return userId
+  }
+
+  // The Worker authenticates callable WebSockets before routing; onRequest repeats the guard.
+  @callable({ description: "Wait for the current chat turn to settle" })
+  async waitForTurnSettlement(): Promise<ChatSettlementResult> {
+    try {
+      const stable = await this.waitUntilStable({ timeout: CHAT_SETTLEMENT_TIMEOUT_MS })
+      return { status: stable ? "stable" : "timeout" }
+    } catch {
+      return { status: "unavailable" }
+    }
   }
 
   async onChatMessage(onEnd: GenerateTextOnEndCallback<ToolSet>, options?: OnChatMessageOptions) {
@@ -98,18 +114,12 @@ export class ChatAgent extends AIChatAgent<Env> {
   }
 
   async onRequest(request: Request): Promise<Response> {
-    const sessionToken = request.headers.get("cookie")?.match(/(?:^|;\s*)__session=([^;]+)/)?.[1]
-    if (!sessionToken) return new Response("Unauthorized", { status: 401 })
-    let payload: Awaited<ReturnType<typeof verifyToken>>
-    try {
-      payload = await verifyToken(sessionToken, { secretKey: process.env.CLERK_SECRET_KEY })
-    } catch {
-      return new Response("Unauthorized", { status: 401 })
-    }
-
-    const threadUserId = await getThreadOwnerUserId(this.name)
-    if (!threadUserId) return new Response("Not Found", { status: 404 })
-    if (threadUserId !== payload.sub) return new Response("Forbidden", { status: 403 })
+    const authFailure = await authorizeChatAgentRequest(
+      request,
+      this.name,
+      process.env.CLERK_SECRET_KEY,
+    )
+    if (authFailure) return authFailure
 
     if (request.method === "DELETE") {
       this.messages = []

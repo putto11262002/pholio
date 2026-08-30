@@ -5,12 +5,14 @@ import viteReact from "@vitejs/plugin-react"
 import viteTsConfigPaths from "vite-tsconfig-paths"
 import tailwindcss from "@tailwindcss/vite"
 import { cloudflare } from "@cloudflare/vite-plugin"
+import agents from "agents/vite"
 
 const config = defineConfig({
   server: {
     allowedHosts: ["dev.pholio.markets", "host.docker.internal"],
   },
   plugins: [
+    agents(),
     devtools(),
     cloudflare({ viteEnvironment: { name: "ssr" } }),
     viteTsConfigPaths({
