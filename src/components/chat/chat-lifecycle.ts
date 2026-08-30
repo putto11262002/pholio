@@ -161,6 +161,29 @@ export function settleTurnCancellation(
     : { ...state, serverSettled: generation, completed: null }
 }
 
+export function cancelTurnAfterTransportFailure(
+  state: TurnGenerationState,
+  generation: number,
+): TurnGenerationState {
+  if (
+    generation !== state.current
+    || state.serverSettled !== generation
+    || (
+      state.stopping !== generation
+      && state.completionAcknowledged !== generation
+    )
+  ) return state
+
+  return {
+    ...state,
+    stopping: null,
+    abortAcknowledged: generation,
+    completionAcknowledged: null,
+    cancelled: generation,
+    completed: null,
+  }
+}
+
 export function completeTurn(state: TurnGenerationState, generation: number): TurnGenerationState {
   if (generation !== state.current || state.cancelled === generation) return state
   if (state.stopping === generation) {

@@ -46,6 +46,7 @@ import type { Thread } from "@/thread/types"
 import { prependThreadToInfiniteData, type ThreadPage } from "@/thread/cache"
 import {
   beginTurn,
+  cancelTurnAfterTransportFailure,
   cancelTurn as cancelTurnGeneration,
   clearTurnCompletion,
   completeTurn as completeTurnGeneration,
@@ -828,6 +829,7 @@ export function ConnectedChat({
   const [cancellationError, setCancellationError] = useState<string | null>(null)
   const [turnState, setTurnState] = useState(initialTurnGenerationState)
   const turnStateRef = useRef(initialTurnGenerationState)
+  const turnTransportFailureRef = useRef({ generation: 0, failed: false })
   const turnCompletionQueueRef = useRef(createTurnGenerationQueue())
   const wasHookBusyRef = useRef(false)
 
@@ -887,6 +889,29 @@ export function ConnectedChat({
           : completeTurnGeneration(current, generation))
     },
   })
+  turnTransportFailureRef.current = {
+    generation: turnStateRef.current.current,
+    failed: status === "error" || Boolean(error),
+  }
+
+  useEffect(() => {
+    const current = turnStateRef.current
+    const generation = current.current
+    const transportFailed = turnTransportFailureRef.current.generation === generation
+      && turnTransportFailureRef.current.failed
+    if (!transportFailed) return
+    if (
+      current.serverSettled !== generation
+      || (
+        current.stopping !== generation
+        && current.completionAcknowledged !== generation
+      )
+    ) return
+
+    const cancelled = transitionTurn((state) =>
+      cancelTurnAfterTransportFailure(state, generation))
+    if (cancelled.cancelled === generation) clearError()
+  }, [status, error, clearError])
 
   const wasCancelled = turnState.cancelled === turnState.current && turnState.current > 0
   const isStopping = turnState.stopping === turnState.current && turnState.current > 0
@@ -1057,7 +1082,15 @@ export function ConnectedChat({
         { timeout: 12_000 },
       )
       if (settlement.status === "stable") {
-        transitionTurn((current) => settleTurnCancellation(current, generation))
+        const transportFailed = turnTransportFailureRef.current.generation === generation
+          && turnTransportFailureRef.current.failed
+        const settled = transitionTurn((current) => {
+          const serverSettled = settleTurnCancellation(current, generation)
+          return transportFailed
+            ? cancelTurnAfterTransportFailure(serverSettled, generation)
+            : serverSettled
+        })
+        if (settled.cancelled === generation && transportFailed) clearError()
         return
       }
       setCancellationError(settlement.status === "timeout"
