@@ -3,6 +3,7 @@ import type { GenerateTextOnEndCallback, StreamTextOnEndCallback, ToolSet } from
 import type { ChatMessage } from "@/agent/chat-message"
 import { createModel } from "@/agent/gateway.server"
 import { generalChatModels, resolveGeneralChatModelKey, type GeneralChatModelKey } from "@/agent/general-chat-models"
+import { createChatTurnDiagnostics, type ChatTurnDiagnostics } from "@/agent/runtime/chat-failure.server"
 import { listAgentSkills } from "@/agent/skills/registry.server"
 import type { AgentSkillMetadata } from "@/agent/skills/types"
 import { createAnalysisTools, type AnalysisTaskDefer } from "@/agent/tools/analysis.server"
@@ -10,7 +11,7 @@ import { createPortfolioTools } from "@/agent/tools/portfolio.server"
 import { createResearchTools } from "@/agent/tools/research.server"
 import { skillTools } from "@/agent/tools/skills.server"
 import { stockTools } from "@/agent/tools/stock.server"
-import { createToolErrorTransform, sanitizeToolErrorMessage, ToolFailureTracker } from "@/agent/tools/errors.server"
+import { createToolErrorTransform, ToolFailureTracker } from "@/agent/tools/errors.server"
 import { withJsonSafeToolOutputs } from "@/agent/tools/json-safe.server"
 import { buildAiRun, getMonthlyLimitUsd, getMonthlySpend, insertAiRun } from "@/agent/usage/api.server"
 import type { ChatProgressCallbacks } from "@/agent/runtime/chat-progress.server"
@@ -72,6 +73,19 @@ function renderSystemPrompt(skills: AgentSkillMetadata[]): string {
   ].join("\n")
 }
 
+async function withTurnFailure<T>(
+  diagnostics: ChatTurnDiagnostics,
+  abortSignal: AbortSignal | undefined,
+  operation: () => T | PromiseLike<T>
+): Promise<Awaited<T>> {
+  try {
+    return await operation()
+  } catch (error) {
+    if (!abortSignal?.aborted) diagnostics.recordFailure(error)
+    throw error
+  }
+}
+
 export async function runChatAgent({
   messages,
   onEnd,
@@ -81,6 +95,7 @@ export async function runChatAgent({
   abortSignal,
   progress,
   defer,
+  diagnostics,
 }: {
   messages: ChatMessage[]
   onEnd: GenerateTextOnEndCallback<ToolSet>
@@ -90,27 +105,43 @@ export async function runChatAgent({
   abortSignal?: AbortSignal
   progress?: ChatProgressCallbacks
   defer?: AnalysisTaskDefer
+  diagnostics?: ChatTurnDiagnostics
 }) {
-  const monthlySpend = await getMonthlySpend(userId)
-  const limit = getMonthlyLimitUsd()
-  if (monthlySpend >= limit) {
-    throw new Error(`Monthly usage limit of $${limit.toFixed(2)} reached. Current spend: $${monthlySpend.toFixed(4)}.`)
-  }
-
-  const modelKey = resolveGeneralChatModelKey(modelKeyOpt)
-  const modelId = generalChatModels[modelKey].id
-  const skills = await listAgentSkills()
-  const researchTools = createResearchTools()
-  const startedAt = Date.now()
-  const baseInstructions = renderSystemPrompt(skills)
-  const tools = withJsonSafeToolOutputs({
-    ...skillTools,
-    ...createPortfolioTools(userId),
-    ...stockTools,
-    ...researchTools,
-    ...createAnalysisTools(userId, threadId, ({ toolCallId, phase }) => progress?.analysisPhase(toolCallId, phase), defer),
+  const turn = diagnostics ?? createChatTurnDiagnostics()
+  turn.markPhase("usage_preflight")
+  await withTurnFailure(turn, abortSignal, async () => {
+    const monthlySpend = await getMonthlySpend(userId)
+    const limit = getMonthlyLimitUsd()
+    if (monthlySpend >= limit) {
+      throw new Error(`Monthly usage limit of $${limit.toFixed(2)} reached. Current spend: $${monthlySpend.toFixed(4)}.`)
+    }
   })
-  const modelMessages = await convertToModelMessages(messages, { tools })
+
+  turn.markPhase("model_resolution")
+  const modelId = await withTurnFailure(turn, abortSignal, () => {
+    const modelKey = resolveGeneralChatModelKey(modelKeyOpt)
+    return generalChatModels[modelKey].id
+  })
+  turn.setModelId(modelId)
+  turn.markPhase("skills_load")
+  const skills = await withTurnFailure(turn, abortSignal, () => listAgentSkills())
+  const startedAt = Date.now()
+  turn.markPhase("tool_setup")
+  const { baseInstructions, tools } = await withTurnFailure(turn, abortSignal, () => {
+    const researchTools = createResearchTools()
+    return {
+      baseInstructions: renderSystemPrompt(skills),
+      tools: withJsonSafeToolOutputs({
+        ...skillTools,
+        ...createPortfolioTools(userId),
+        ...stockTools,
+        ...researchTools,
+        ...createAnalysisTools(userId, threadId, ({ toolCallId, phase }) => progress?.analysisPhase(toolCallId, phase), defer),
+      }),
+    }
+  })
+  turn.markPhase("history_conversion")
+  const modelMessages = await withTurnFailure(turn, abortSignal, () => convertToModelMessages(messages, { tools }))
   const toolNames = Object.keys(tools) as Array<keyof typeof tools & string>
   const failureTracker = new ToolFailureTracker()
 
@@ -126,17 +157,18 @@ export async function runChatAgent({
     }))
     try {
       await insertAiRun(buildAiRun({ event, userId, threadId, type: "chat", startedAt }))
-    } catch (err) {
+    } catch {
       console.error(JSON.stringify({
         event: "agent.chat.usage_insert_failed",
         threadId,
-        error: sanitizeToolErrorMessage(err),
+        failed: true,
       }))
     }
     await onEnd(event)
   }
 
-  return streamText({
+  turn.markPhase("provider_start")
+  return await withTurnFailure(turn, abortSignal, () => streamText({
     model: createModel(modelId),
     instructions: baseInstructions,
     tools,
@@ -167,11 +199,7 @@ export async function runChatAgent({
     },
     onError: (event) => {
       progress?.recovering()
-      console.error(JSON.stringify({
-        event: "agent.chat.error",
-        threadId,
-        error: sanitizeToolErrorMessage(event.error),
-      }))
+      if (!abortSignal?.aborted) turn.recordFailure(event.error)
     },
     onAbort: (event) => {
       progress?.cancelled()
@@ -194,8 +222,6 @@ export async function runChatAgent({
       const output = event.toolOutput.type === "tool-result" ? event.toolOutput.output : undefined
       const businessFailure = typeof output === "object" && output !== null && "success" in output && output.success === false
       const success = event.toolOutput.type === "tool-result" && !businessFailure
-      const error = event.toolOutput.type === "tool-error" ? event.toolOutput.error : undefined
-      const outputJson = output === undefined ? undefined : JSON.stringify(output)
       progress?.toolFinished(event.toolCall.toolName, event.toolCall.toolCallId, success, output)
       console.info(JSON.stringify({
         event: "agent.chat.tool_finish",
@@ -204,8 +230,6 @@ export async function runChatAgent({
         toolCallId: event.toolCall.toolCallId,
         success,
         durationMs: event.toolExecutionMs,
-        outputBytes: outputJson === undefined ? undefined : new TextEncoder().encode(outputJson).byteLength,
-        error: error === undefined ? undefined : sanitizeToolErrorMessage(error),
       }))
     },
     onStepEnd: (event) => {
@@ -218,12 +242,16 @@ export async function runChatAgent({
       }))
     },
     onStepStart: (event) => {
+      turn.markPhase(event.stepNumber === 0 ? "provider_stream" : "tool_continuation")
       if (event.stepNumber === 0) progress?.waiting(event.stepNumber)
       else progress?.composing(event.stepNumber)
     },
     onChunk: ({ chunk }) => {
+      if (!["start", "start-step", "finish", "finish-step", "abort", "error"].includes(chunk.type)) {
+        turn.markFirstOutput()
+      }
       if (chunk.type === "text-start") progress?.composing(0)
     },
     onEnd: wrappedOnEnd,
-  })
+  }))
 }
