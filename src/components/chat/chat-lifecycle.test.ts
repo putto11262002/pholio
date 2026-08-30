@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest"
 import {
   beginTurn,
   cancelTurn,
+  clearTurnCompletion,
   completeTurn,
+  continueTurn,
   createTurnGenerationQueue,
   createSelectionIntentTracker,
   initialTurnGenerationState,
@@ -10,6 +12,7 @@ import {
   requestTurnCancellation,
   resolveChatLifecycle,
   retryTurn,
+  settleTurnCancellation,
 } from "./chat-lifecycle"
 
 const baseLifecycle = {
@@ -79,10 +82,9 @@ describe("turn generations", () => {
     const firstTurn = beginTurn(initialTurnGenerationState)
     const completions = createTurnGenerationQueue()
     completions.enqueue(firstTurn.current)
-    const stopped = cancelTurn(
-      requestTurnCancellation(firstTurn, firstTurn.current),
-      firstTurn.current,
-    )
+    const stopping = requestTurnCancellation(firstTurn, firstTurn.current)
+    const locallyAborted = cancelTurn(stopping, firstTurn.current)
+    const stopped = settleTurnCancellation(locallyAborted, firstTurn.current)
     const secondTurn = beginTurn(stopped)
     completions.enqueue(secondTurn.current)
 
@@ -138,32 +140,145 @@ describe("turn generations", () => {
     expect(completeTurn(current, current.current - 1)).toEqual(current)
   })
 
-  it("does not mark a turn cancelled before explicit stopping is acknowledged", () => {
+  it("requires both local abort and server settlement before cancellation is terminal", () => {
     const running = beginTurn(initialTurnGenerationState)
     const stopping = requestTurnCancellation(running, running.current)
 
     expect(stopping.stopping).toBe(running.current)
     expect(stopping.cancelled).toBeNull()
     expect(cancelTurn(running, running.current)).toEqual(running)
-    expect(cancelTurn(stopping, stopping.current)).toMatchObject({
+    const locallyAborted = cancelTurn(stopping, stopping.current)
+    expect(locallyAborted).toMatchObject({
+      stopping: stopping.current,
+      abortAcknowledged: stopping.current,
+      cancelled: null,
+    })
+    expect(settleTurnCancellation(locallyAborted, stopping.current)).toMatchObject({
+      stopping: null,
+      serverSettled: stopping.current,
+      cancelled: stopping.current,
+    })
+  })
+
+  it("also waits for the local abort when server settlement arrives first", () => {
+    const running = beginTurn(initialTurnGenerationState)
+    const stopping = requestTurnCancellation(running, running.current)
+    const serverSettled = settleTurnCancellation(stopping, stopping.current)
+
+    expect(serverSettled).toMatchObject({
+      stopping: stopping.current,
+      serverSettled: stopping.current,
+      cancelled: null,
+    })
+    expect(cancelTurn(serverSettled, stopping.current)).toMatchObject({
       stopping: null,
       cancelled: stopping.current,
     })
   })
 
-  it("ignores late completion while stopping and after cancellation", () => {
+  it("holds a normal finish behind the settlement barrier", () => {
     const running = beginTurn(initialTurnGenerationState)
     const stopping = requestTurnCancellation(running, running.current)
-    const cancelled = cancelTurn(stopping, stopping.current)
+    const finished = completeTurn(stopping, stopping.current)
 
-    expect(completeTurn(stopping, stopping.current)).toEqual(stopping)
+    expect(finished).toMatchObject({
+      stopping: stopping.current,
+      completionAcknowledged: stopping.current,
+      completed: null,
+    })
+    expect(settleTurnCancellation(finished, stopping.current)).toMatchObject({
+      stopping: null,
+      completed: stopping.current,
+    })
+  })
+
+  it("terminalizes a normal finish that arrives after server settlement", () => {
+    const running = beginTurn(initialTurnGenerationState)
+    const stopping = requestTurnCancellation(running, running.current)
+    const serverSettled = settleTurnCancellation(stopping, stopping.current)
+
+    expect(serverSettled.stopping).toBe(stopping.current)
+    expect(completeTurn(serverSettled, stopping.current)).toMatchObject({
+      stopping: null,
+      completionAcknowledged: stopping.current,
+      completed: stopping.current,
+    })
+  })
+
+  it("keeps the first local terminal acknowledgement when late events disagree", () => {
+    const running = beginTurn(initialTurnGenerationState)
+    const stopping = requestTurnCancellation(running, running.current)
+    const finished = completeTurn(stopping, stopping.current)
+    const lateAbort = cancelTurn(finished, stopping.current)
+    expect(lateAbort).toEqual(finished)
+
+    const aborted = cancelTurn(stopping, stopping.current)
+    expect(completeTurn(aborted, stopping.current)).toEqual(aborted)
+  })
+
+  it("preserves a completion recorded just before Stop until settlement", () => {
+    const running = beginTurn(initialTurnGenerationState)
+    const completed = completeTurn(running, running.current)
+    const stopping = requestTurnCancellation(completed, completed.current)
+
+    expect(stopping).toMatchObject({
+      stopping: completed.current,
+      completionAcknowledged: completed.current,
+      completed: completed.current,
+    })
+    expect(settleTurnCancellation(stopping, completed.current)).toMatchObject({
+      stopping: null,
+      completed: completed.current,
+    })
+  })
+
+  it("clears prior completion when a genuine continuation starts", () => {
+    const running = beginTurn(initialTurnGenerationState)
+    const completed = completeTurn(running, running.current)
+
+    expect(continueTurn(completed)).toMatchObject({
+      current: completed.current,
+      completionAcknowledged: null,
+      completed: null,
+    })
+  })
+
+  it("clears only stale completion while a bridged continuation is active", () => {
+    const running = beginTurn(initialTurnGenerationState)
+    const completed = completeTurn(running, running.current)
+    const stopping = settleTurnCancellation(
+      requestTurnCancellation(completed, completed.current),
+      completed.current,
+    )
+
+    expect(clearTurnCompletion(stopping, stopping.current)).toMatchObject({
+      stopping: null,
+      serverSettled: stopping.current,
+      completionAcknowledged: null,
+      completed: null,
+    })
+  })
+
+  it("ignores late completion after abort acknowledgement and cancellation", () => {
+    const running = beginTurn(initialTurnGenerationState)
+    const stopping = requestTurnCancellation(running, running.current)
+    const locallyAborted = cancelTurn(stopping, stopping.current)
+    const cancelled = settleTurnCancellation(
+      locallyAborted,
+      stopping.current,
+    )
+
+    expect(completeTurn(locallyAborted, stopping.current)).toEqual(locallyAborted)
     expect(completeTurn(cancelled, cancelled.current)).toEqual(cancelled)
   })
 
   it("allows a fresh generation only after cancellation is terminal", () => {
     const running = beginTurn(initialTurnGenerationState)
     const stopping = requestTurnCancellation(running, running.current)
-    const cancelled = cancelTurn(stopping, stopping.current)
+    const cancelled = settleTurnCancellation(
+      cancelTurn(stopping, stopping.current),
+      stopping.current,
+    )
     const next = beginTurn(cancelled)
 
     expect(next.current).toBe(cancelled.current + 1)

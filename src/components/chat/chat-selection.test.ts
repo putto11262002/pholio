@@ -3,7 +3,7 @@ import {
   beginDraftCreation,
   chatSessionKey,
   initialChatSelection,
-  markInitialMessageDispatched,
+  markInitialMessageObserved,
   selectNewDraft,
   selectPersistedThread,
   settleDraftCreation,
@@ -54,7 +54,7 @@ describe("chat selection", () => {
         title: "Use conservative risk tolerance",
         modelKey: "flash",
       },
-      "old transcript prompt"
+      { id: "old-message", text: "old transcript prompt" }
     )
     const draft = selectNewDraft(oldThread)
     const newThread = selectPersistedThread(
@@ -64,12 +64,12 @@ describe("chat selection", () => {
         title: null,
         modelKey: "flash",
       },
-      "fresh prompt"
+      { id: "fresh-message", text: "fresh prompt" }
     )
 
     expect(newThread.threadId).toBe("new-thread")
     expect(newThread.title).toBeNull()
-    expect(newThread.initialMessage).toBe("fresh prompt")
+    expect(newThread.initialMessage).toEqual({ id: "fresh-message", text: "fresh prompt" })
     expect(newThread.version).toBeGreaterThan(oldThread.version)
     expect(JSON.stringify(newThread)).not.toContain("old transcript prompt")
     expect(JSON.stringify(newThread)).not.toContain("conservative")
@@ -83,7 +83,7 @@ describe("chat selection", () => {
         title: null,
         modelKey: "flash",
       },
-      "old prompt"
+      { id: "old-message", text: "old prompt" }
     )
     const newThread = selectPersistedThread(
       selectNewDraft(oldThread),
@@ -92,11 +92,11 @@ describe("chat selection", () => {
         title: null,
         modelKey: "flash",
       },
-      "new prompt"
+      { id: "new-message", text: "new prompt" }
     )
 
     expect(
-      markInitialMessageDispatched(
+      markInitialMessageObserved(
         newThread,
         oldThread.version,
         oldThread.threadId

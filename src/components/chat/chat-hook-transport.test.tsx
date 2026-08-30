@@ -34,7 +34,15 @@ class FakeAgent extends EventTarget {
 }
 
 type HookControls = {
-  sendMessage: (input: { text: string }) => void
+  sendMessage: (input:
+    | { text: string }
+    | {
+        id: string
+        role: "user"
+        parts: [{ type: "text"; text: string }]
+        metadata?: { turnGeneration?: number }
+      }
+  ) => Promise<void>
   stop: () => Promise<void>
 }
 
@@ -57,9 +65,7 @@ function HookHarness({
 
   useEffect(() => {
     onReady({
-      sendMessage: (input) => {
-        void chat.sendMessage(input)
-      },
+      sendMessage: (input) => chat.sendMessage(input),
       stop: chat.stop,
     })
   }, [chat.sendMessage, chat.stop, onReady])
@@ -89,7 +95,7 @@ describe("useAgentChat transport contract", () => {
     )
 
     await waitFor(() => expect(explicitControls).toBeDefined())
-    act(() => explicitControls?.sendMessage({ text: "cancel this" }))
+    act(() => { void explicitControls?.sendMessage({ text: "cancel this" }) })
     await waitFor(() => expect(requestFrames(explicitAgent)).toHaveLength(1))
     await act(async () => {
       await explicitControls?.stop()
@@ -111,7 +117,7 @@ describe("useAgentChat transport contract", () => {
       />,
     )
     await waitFor(() => expect(navigationControls).toBeDefined())
-    act(() => navigationControls?.sendMessage({ text: "keep running" }))
+    act(() => { void navigationControls?.sendMessage({ text: "keep running" }) })
     await waitFor(() => expect(requestFrames(navigationAgent)).toHaveLength(1))
 
     navigation.unmount()
@@ -139,7 +145,7 @@ describe("useAgentChat transport contract", () => {
       <HookHarness key="new" agent={newAgent} messages={[]} onReady={onReady} />,
     )
     await waitFor(() => expect(controls).toBeDefined())
-    act(() => controls?.sendMessage({ text: "fresh prompt only" }))
+    act(() => { void controls?.sendMessage({ text: "fresh prompt only" }) })
     await waitFor(() => expect(requestFrames(newAgent)).toHaveLength(1))
 
     const request = requestFrames(newAgent)[0]
@@ -147,5 +153,40 @@ describe("useAgentChat transport contract", () => {
     expect(JSON.stringify(body.messages)).toContain("fresh prompt only")
     expect(JSON.stringify(body.messages)).not.toContain("old secret context")
     expect(requestFrames(oldAgent)).toHaveLength(0)
+  })
+
+  it("appends a full user message with its stable id to the outbound transcript", async () => {
+    const agent = new FakeAgent("stable-initial-message")
+    let controls: HookControls | undefined
+    render(
+      <HookHarness
+        agent={agent}
+        messages={[]}
+        onReady={(next) => { controls = next }}
+      />,
+    )
+    await waitFor(() => expect(controls).toBeDefined())
+
+    let sendPromise: Promise<void> | undefined
+    act(() => {
+      sendPromise = controls?.sendMessage({
+        id: "stable-user-id",
+        role: "user",
+        parts: [{ type: "text", text: "survive reload" }],
+        metadata: { turnGeneration: 1 },
+      })
+    })
+    await waitFor(() => expect(requestFrames(agent)).toHaveLength(1))
+
+    const body = JSON.parse(requestFrames(agent)[0]?.init?.body ?? "{}") as { messages?: ChatMessage[] }
+    expect(body.messages).toContainEqual({
+      id: "stable-user-id",
+      role: "user",
+      parts: [{ type: "text", text: "survive reload" }],
+      metadata: { turnGeneration: 1 },
+    })
+
+    await act(async () => { await controls?.stop() })
+    await expect(sendPromise).resolves.toBeUndefined()
   })
 })
