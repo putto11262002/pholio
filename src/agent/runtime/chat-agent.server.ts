@@ -12,6 +12,7 @@ import {
   createChatProgressEmitter,
   createChatProgressRunId,
 } from "@/agent/runtime/chat-progress.server"
+import { createChatTurnDiagnostics } from "@/agent/runtime/chat-failure.server"
 
 export class ChatAgent extends AIChatAgent<Env> {
   private async getThreadUserId(): Promise<string> {
@@ -21,9 +22,10 @@ export class ChatAgent extends AIChatAgent<Env> {
   }
 
   async onChatMessage(onEnd: GenerateTextOnEndCallback<ToolSet>, options?: OnChatMessageOptions) {
+    const diagnostics = createChatTurnDiagnostics()
     const modelKey = options?.body?.modelKey as GeneralChatModelKey | undefined
-    const userId = await this.getThreadUserId()
     const threadId = this.name
+    const safeStreamError = diagnostics.userError(MISSING_STREAM_ERROR)
 
     return createUIMessageStreamResponse({
       stream: createUIMessageStream<ChatMessage>({
@@ -35,6 +37,8 @@ export class ChatAgent extends AIChatAgent<Env> {
           })
           progress.preparing()
           try {
+            diagnostics.markPhase("thread_lookup")
+            const userId = await this.getThreadUserId()
             const result = await runChatAgent({
               messages: this.messages as ChatMessage[],
               onEnd,
@@ -44,15 +48,20 @@ export class ChatAgent extends AIChatAgent<Env> {
               abortSignal: options?.abortSignal,
               progress: progress.callbacks,
               defer: (task) => this.ctx.waitUntil(task),
+              diagnostics,
             })
 
             const responseStream = toUIMessageStream<ToolSet, ChatMessage>({
               stream: result.stream,
               sendReasoning: false,
-              onError: () => {
-                if (options?.abortSignal?.aborted) progress.cancelled()
-                else progress.failed(MISSING_STREAM_ERROR)
-                return MISSING_STREAM_ERROR
+              onError: (error) => {
+                if (options?.abortSignal?.aborted) {
+                  progress.cancelled()
+                  return MISSING_STREAM_ERROR
+                }
+                diagnostics.recordFailure(error, "ui_stream")
+                progress.failed(MISSING_STREAM_ERROR)
+                return safeStreamError
               },
             })
             const reader = responseStream.getReader()
@@ -64,19 +73,25 @@ export class ChatAgent extends AIChatAgent<Env> {
               }
               progress.completed()
             } catch (error) {
-              if (options?.abortSignal?.aborted) progress.cancelled()
-              else progress.failed(MISSING_STREAM_ERROR)
+              if (!options?.abortSignal?.aborted) diagnostics.recordFailure(error, "ui_stream")
               throw error
             } finally {
               reader.releaseLock()
             }
           } catch (error) {
             if (options?.abortSignal?.aborted) progress.cancelled()
-            else progress.failed(MISSING_STREAM_ERROR)
+            else {
+              diagnostics.recordFailure(error)
+              progress.failed(MISSING_STREAM_ERROR)
+            }
             throw error
           }
         },
-        onError: () => MISSING_STREAM_ERROR,
+        onError: (error) => {
+          if (options?.abortSignal?.aborted) return MISSING_STREAM_ERROR
+          diagnostics.recordFailure(error, "ui_stream")
+          return safeStreamError
+        },
       }),
     })
   }

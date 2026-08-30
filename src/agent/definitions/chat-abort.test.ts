@@ -1,8 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { runChatAgent } from "./chat.server"
+import { ChatTurnDiagnostics } from "@/agent/runtime/chat-failure.server"
 
 const mocks = vi.hoisted(() => ({
   createAnalysisTools: vi.fn(() => ({})),
+  createPortfolioTools: vi.fn(() => ({})),
   convertToModelMessages: vi.fn(async (messages) => messages),
+  getMonthlySpend: vi.fn(async () => 0),
+  resolveGeneralChatModelKey: vi.fn(() => "model"),
   streamText: vi.fn(),
 }))
 
@@ -16,7 +21,7 @@ vi.mock("ai", () => ({
 vi.mock("@/agent/gateway.server", () => ({ createModel: vi.fn(() => "model") }))
 vi.mock("@/agent/general-chat-models", () => ({
   generalChatModels: { model: { id: "provider/model" } },
-  resolveGeneralChatModelKey: vi.fn(() => "model"),
+  resolveGeneralChatModelKey: mocks.resolveGeneralChatModelKey,
 }))
 vi.mock("@/agent/skills/registry.server", () => ({
   listAgentSkills: vi.fn(async () => []),
@@ -25,7 +30,7 @@ vi.mock("@/agent/tools/analysis.server", () => ({
   createAnalysisTools: mocks.createAnalysisTools,
 }))
 vi.mock("@/agent/tools/portfolio.server", () => ({
-  createPortfolioTools: vi.fn(() => ({})),
+  createPortfolioTools: mocks.createPortfolioTools,
 }))
 vi.mock("@/agent/tools/research.server", () => ({
   createResearchTools: vi.fn(() => ({})),
@@ -36,15 +41,19 @@ vi.mock("@/agent/tools/errors.server", async (importOriginal) => importOriginal(
 vi.mock("@/agent/usage/api.server", () => ({
   buildAiRun: vi.fn(),
   getMonthlyLimitUsd: vi.fn(() => 10),
-  getMonthlySpend: vi.fn(async () => 0),
+  getMonthlySpend: mocks.getMonthlySpend,
   insertAiRun: vi.fn(async () => undefined),
 }))
 
-import { runChatAgent } from "./chat.server"
-
-describe("runChatAgent cancellation", () => {
+describe("runChatAgent", () => {
   beforeEach(() => {
     mocks.convertToModelMessages.mockClear()
+    mocks.createPortfolioTools.mockReset()
+    mocks.createPortfolioTools.mockReturnValue({})
+    mocks.getMonthlySpend.mockReset()
+    mocks.getMonthlySpend.mockResolvedValue(0)
+    mocks.resolveGeneralChatModelKey.mockReset()
+    mocks.resolveGeneralChatModelKey.mockReturnValue("model")
     mocks.streamText.mockReset()
     mocks.streamText.mockReturnValue({ stream: new ReadableStream() })
   })
@@ -112,5 +121,113 @@ describe("runChatAgent cancellation", () => {
     expect(prepared.activeTools).toEqual(["tool_b"])
     expect(prepared.instructions).toContain("tool_a:")
     expect(prepared.instructions).toContain("repeated 6 times")
+  })
+
+  it("records a preflight failure once without logging sensitive error data", async () => {
+    const log = vi.fn()
+    const diagnostics = new ChatTurnDiagnostics({ referenceId: "CHAT-PREFLIGHT", now: () => 0, log })
+    mocks.getMonthlySpend.mockRejectedValueOnce(Object.assign(new Error("private holdings and sk-secret"), {
+      requestBodyValues: { messages: ["sensitive prompt"] },
+    }))
+
+    await expect(runChatAgent({
+      messages: [],
+      onEnd: vi.fn(),
+      userId: "user-1",
+      threadId: "thread-1",
+      diagnostics,
+    })).rejects.toThrow("private holdings")
+
+    expect(log).toHaveBeenCalledTimes(1)
+    expect(log).toHaveBeenCalledWith(expect.objectContaining({
+      event: "agent.chat.terminal_failure",
+      referenceId: "CHAT-PREFLIGHT",
+      phase: "usage_preflight",
+      firstOutputArrived: false,
+    }))
+    expect(JSON.stringify(log.mock.calls)).not.toContain("private holdings")
+    expect(JSON.stringify(log.mock.calls)).not.toContain("sensitive prompt")
+    expect(JSON.stringify(log.mock.calls)).not.toContain("sk-secret")
+  })
+
+  it("records a provider-start failure with the resolved model", async () => {
+    const log = vi.fn()
+    const diagnostics = new ChatTurnDiagnostics({ referenceId: "CHAT-PROVIDER", now: () => 0, log })
+    mocks.streamText.mockImplementationOnce(() => {
+      throw Object.assign(new Error("provider body contains a secret"), {
+        name: "AI_APICallError",
+        statusCode: 503,
+        isRetryable: true,
+        responseBody: "private provider response",
+      })
+    })
+
+    await expect(runChatAgent({
+      messages: [],
+      onEnd: vi.fn(),
+      userId: "user-1",
+      threadId: "thread-1",
+      diagnostics,
+    })).rejects.toThrow("provider body")
+
+    expect(log).toHaveBeenCalledTimes(1)
+    expect(log).toHaveBeenCalledWith(expect.objectContaining({
+      referenceId: "CHAT-PROVIDER",
+      phase: "provider_start",
+      modelId: "provider/model",
+      status: 503,
+      code: "provider_api_error",
+      retryable: true,
+      firstOutputArrived: false,
+    }))
+    expect(JSON.stringify(log.mock.calls)).not.toContain("private provider response")
+    expect(JSON.stringify(log.mock.calls)).not.toContain("provider body")
+  })
+
+  it("records model resolution failures in their exact phase", async () => {
+    const log = vi.fn()
+    const diagnostics = new ChatTurnDiagnostics({ referenceId: "CHAT-MODEL", now: () => 0, log })
+    mocks.resolveGeneralChatModelKey.mockImplementationOnce(() => {
+      throw new Error("invalid private model setting")
+    })
+
+    await expect(runChatAgent({
+      messages: [],
+      onEnd: vi.fn(),
+      userId: "user-1",
+      threadId: "thread-1",
+      diagnostics,
+    })).rejects.toThrow("invalid private model")
+
+    expect(log).toHaveBeenCalledTimes(1)
+    expect(log).toHaveBeenCalledWith(expect.objectContaining({
+      referenceId: "CHAT-MODEL",
+      phase: "model_resolution",
+    }))
+    expect(JSON.stringify(log.mock.calls)).not.toContain("private model")
+  })
+
+  it("records tool construction failures in their exact phase", async () => {
+    const log = vi.fn()
+    const diagnostics = new ChatTurnDiagnostics({ referenceId: "CHAT-TOOLS", now: () => 0, log })
+    mocks.createPortfolioTools.mockImplementationOnce(() => {
+      throw new Error("private portfolio setup")
+    })
+
+    await expect(runChatAgent({
+      messages: [],
+      onEnd: vi.fn(),
+      userId: "user-1",
+      threadId: "thread-1",
+      diagnostics,
+    })).rejects.toThrow("private portfolio setup")
+
+    expect(log).toHaveBeenCalledTimes(1)
+    expect(log).toHaveBeenCalledWith(expect.objectContaining({
+      referenceId: "CHAT-TOOLS",
+      phase: "tool_setup",
+      modelId: "provider/model",
+    }))
+    expect(JSON.stringify(log.mock.calls)).not.toContain("private portfolio")
   })
 })
