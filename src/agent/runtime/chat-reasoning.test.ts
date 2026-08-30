@@ -4,7 +4,7 @@ import { MockLanguageModelV4, simulateReadableStream } from "ai/test"
 import { MISSING_STREAM_ERROR } from "@/agent/tools/errors.server"
 
 describe("chat reasoning stream", () => {
-  it("preserves reasoning and final text in the UI message protocol", async () => {
+  it("suppresses reasoning while preserving final text in the UI message protocol", async () => {
     const model = new MockLanguageModelV4({
       provider: "gateway",
       modelId: "deepseek/deepseek-v4-flash",
@@ -33,14 +33,14 @@ describe("chat reasoning stream", () => {
 
     const result = streamText({ model, prompt: "What is my largest position?" })
     const response = createUIMessageStreamResponse({
-      stream: toUIMessageStream({ stream: result.stream, sendReasoning: true }),
+      stream: toUIMessageStream({ stream: result.stream, sendReasoning: false }),
     })
     const protocol = await response.text()
     const usage = await result.usage
 
-    expect(protocol).toContain('"type":"reasoning-start"')
-    expect(protocol).toContain('"delta":"Check the portfolio first."')
-    expect(protocol).toContain('"type":"reasoning-end"')
+    expect(protocol).not.toContain('"type":"reasoning-start"')
+    expect(protocol).not.toContain('"delta":"Check the portfolio first."')
+    expect(protocol).not.toContain('"type":"reasoning-end"')
     expect(protocol).toContain('"delta":"Your largest position is AAPL."')
     expect(usage.outputTokenDetails.reasoningTokens).toBe(7)
   })

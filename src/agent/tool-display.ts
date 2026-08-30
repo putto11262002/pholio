@@ -4,6 +4,40 @@ export type ToolDisplay = {
   resultMessage: (output: unknown) => string
 }
 
+function safeInputString(input: Record<string, unknown>, key: string): string | null {
+  const value = input[key]
+  return typeof value === "string" && value.trim() ? value.trim() : null
+}
+
+function safeUiText(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback
+  const text = value.trim()
+  if (!text || /\bundefined\b/i.test(text)) return fallback
+  return text
+}
+
+export function toolLabel(toolName: unknown): string {
+  if (typeof toolName !== "string" || !toolName.trim()) return "Tool"
+  return safeUiText(toolDisplayRegistry[toolName]?.label, "Tool")
+}
+
+export function toolLoadingMessage(toolName: unknown, input: unknown): string {
+  if (typeof toolName !== "string" || !toolName.trim()) return "Running a tool…"
+  const display = toolDisplayRegistry[toolName]
+  if (!display) return "Running a tool…"
+  if (typeof display.loadingMessage === "string") {
+    return safeUiText(display.loadingMessage, "Running a tool…")
+  }
+  const safeInput = typeof input === "object" && input !== null
+    ? input as Record<string, unknown>
+    : {}
+  try {
+    return safeUiText(display.loadingMessage(safeInput), "Running a tool…")
+  } catch {
+    return "Running a tool…"
+  }
+}
+
 export function isNormalizedToolFailure(output: unknown): output is { success: false; message: string } {
   return typeof output === "object"
     && output !== null
@@ -15,7 +49,12 @@ export function isNormalizedToolFailure(output: unknown): output is { success: f
 
 export function toolResultMessage(display: ToolDisplay | undefined, output: unknown): string | null {
   if (isNormalizedToolFailure(output)) return output.message || "Tool failed"
-  return display ? display.resultMessage(output) : null
+  if (!display) return null
+  try {
+    return safeUiText(display.resultMessage(output), "Tool finished")
+  } catch {
+    return "Tool finished"
+  }
 }
 
 type Portfolio = { summary: { positionCount: number; totalValueUSD: number }; positions: unknown[] }
@@ -38,7 +77,7 @@ type SkillFile = { found: boolean; title?: string; path?: string }
 type ResearchSearch = { results: unknown[] }
 type ResearchPage = { title?: string | null; truncated?: boolean; charCount?: number }
 
-export const toolDisplayRegistry: Record<string, ToolDisplay> = {
+export const toolDisplayRegistry: Partial<Record<string, ToolDisplay>> = {
   skill_list: {
     label: "Skills",
     loadingMessage: "Checking available skills…",
@@ -50,7 +89,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   skill_load: {
     label: "Skill",
-    loadingMessage: (input) => `Loading ${input.name}…`,
+    loadingMessage: (input) => safeInputString(input, "name") ? `Loading ${safeInputString(input, "name")}…` : "Loading a skill…",
     resultMessage: (out) => {
       const o = out as SkillLoad
       if (!o.found) return "Skill not found"
@@ -61,7 +100,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   skill_read_file: {
     label: "Skill File",
-    loadingMessage: (input) => `Reading ${input.file}…`,
+    loadingMessage: (input) => safeInputString(input, "file") ? `Reading ${safeInputString(input, "file")}…` : "Reading a skill file…",
     resultMessage: (out) => {
       const o = out as SkillFile
       if (!o.found) return "Skill file not found"
@@ -80,7 +119,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   market_get_quote: {
     label: "Quote",
-    loadingMessage: (input) => `Looking up ${input.ticker}…`,
+    loadingMessage: (input) => safeInputString(input, "ticker") ? `Looking up ${safeInputString(input, "ticker")}…` : "Looking up a quote…",
     resultMessage: (out) => {
       const o = out as Quote
       const sign = o.changePct >= 0 ? "+" : ""
@@ -90,7 +129,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   portfolio_get_position_detail: {
     label: "Position",
-    loadingMessage: (input) => `Reviewing ${input.ticker}…`,
+    loadingMessage: (input) => safeInputString(input, "ticker") ? `Reviewing ${safeInputString(input, "ticker")}…` : "Reviewing a position…",
     resultMessage: (out) => {
       const o = out as PositionDetail
       if (!o.position) return `${o.ticker} is not in portfolio`
@@ -119,7 +158,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   market_get_company_info: {
     label: "Company",
-    loadingMessage: (input) => `Looking up ${input.ticker}…`,
+    loadingMessage: (input) => safeInputString(input, "ticker") ? `Looking up ${safeInputString(input, "ticker")}…` : "Looking up company information…",
     resultMessage: (out) => {
       const o = out as Company
       return o.sector ? `${o.name} · ${o.sector}` : o.name
@@ -128,7 +167,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   news_get_recent: {
     label: "News",
-    loadingMessage: (input) => `Fetching news for ${input.ticker}…`,
+    loadingMessage: (input) => safeInputString(input, "ticker") ? `Fetching news for ${safeInputString(input, "ticker")}…` : "Fetching recent news…",
     resultMessage: (out) => {
       const o = out as NewsItem
       return `${o.length} article${o.length !== 1 ? "s" : ""} found`
@@ -137,7 +176,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   market_get_fundamentals: {
     label: "Fundamentals",
-    loadingMessage: (input) => `Checking fundamentals for ${input.ticker}…`,
+    loadingMessage: (input) => safeInputString(input, "ticker") ? `Checking fundamentals for ${safeInputString(input, "ticker")}…` : "Checking fundamentals…",
     resultMessage: (out) => {
       const o = out as Fundamentals
       const pe = o.peRatio != null ? `P/E ${o.peRatio.toFixed(1)}` : "P/E n/a"
@@ -148,7 +187,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   market_get_earnings: {
     label: "Earnings",
-    loadingMessage: (input) => `Checking earnings for ${input.ticker}…`,
+    loadingMessage: (input) => safeInputString(input, "ticker") ? `Checking earnings for ${safeInputString(input, "ticker")}…` : "Checking earnings…",
     resultMessage: (out) => {
       const o = out as Earnings
       return o.next ? `Next ${new Date(o.next.date).toLocaleDateString()}` : `${o.past.length} past events`
@@ -157,7 +196,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   market_get_price_target: {
     label: "Price Target",
-    loadingMessage: (input) => `Checking price targets for ${input.ticker}…`,
+    loadingMessage: (input) => safeInputString(input, "ticker") ? `Checking price targets for ${safeInputString(input, "ticker")}…` : "Checking price targets…",
     resultMessage: (out) => {
       const o = out as PriceTarget
       const analysts = o.numberOfAnalysts ?? 0
@@ -167,7 +206,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   market_get_recommendation_trends: {
     label: "Recommendations",
-    loadingMessage: (input) => `Checking recommendations for ${input.ticker}…`,
+    loadingMessage: (input) => safeInputString(input, "ticker") ? `Checking recommendations for ${safeInputString(input, "ticker")}…` : "Checking recommendations…",
     resultMessage: (out) => {
       const o = out as Recommendation
       return `${o.trends.length} period${o.trends.length !== 1 ? "s" : ""}`
@@ -176,7 +215,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   market_get_fx_rate: {
     label: "FX",
-    loadingMessage: (input) => `Checking ${input.from ?? "USD"}/${input.to ?? "THB"}…`,
+    loadingMessage: (input) => `Checking ${safeInputString(input, "from") ?? "USD"}/${safeInputString(input, "to") ?? "THB"}…`,
     resultMessage: (out) => {
       const o = out as FXRate
       return `${o.from}/${o.to} ${o.rate.toFixed(4)}`
@@ -185,7 +224,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   market_get_price_history_summary: {
     label: "Price History",
-    loadingMessage: (input) => `Summarizing ${input.ticker} history…`,
+    loadingMessage: (input) => safeInputString(input, "ticker") ? `Summarizing ${safeInputString(input, "ticker")} history…` : "Summarizing price history…",
     resultMessage: (out) => {
       const o = out as PriceHistorySummary
       if (o.periodReturnPct == null) return `${o.ticker} · ${o.barCount} bars`
@@ -196,7 +235,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   research_search_web: {
     label: "Web Search",
-    loadingMessage: (input) => `Searching ${input.query}…`,
+    loadingMessage: (input) => safeInputString(input, "query") ? `Searching ${safeInputString(input, "query")}…` : "Searching the web…",
     resultMessage: (out) => {
       const o = out as ResearchSearch
       return `${o.results.length} result${o.results.length !== 1 ? "s" : ""} found`
@@ -205,7 +244,7 @@ export const toolDisplayRegistry: Record<string, ToolDisplay> = {
 
   research_read_page: {
     label: "Page",
-    loadingMessage: (input) => `Reading ${input.url}…`,
+    loadingMessage: "Reading a source page…",
     resultMessage: (out) => {
       const o = out as ResearchPage
       const suffix = o.truncated ? " · truncated" : ""

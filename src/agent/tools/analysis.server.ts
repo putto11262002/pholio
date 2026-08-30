@@ -133,6 +133,12 @@ const analysisOutputSchema = z.object({
 })
 
 type AnalysisPhase = "sandbox_io" | "exec" | "output"
+type AnalysisProgressPhase = "provisioning" | "uploading" | "running" | "reading"
+
+export type AnalysisProgressReporter = (event: {
+  toolCallId: string
+  phase: AnalysisProgressPhase
+}) => void
 
 function logAnalysis(event: string, data: Record<string, unknown>) {
   console.info(JSON.stringify({
@@ -215,13 +221,13 @@ async function withTimeout<T>(
   }
 }
 
-export function createAnalysisTools(userId: string) {
+export function createAnalysisTools(userId: string, reportProgress?: AnalysisProgressReporter) {
   return {
   analysis_run_code: tool({
     description:
       "Run bounded Python analysis over portfolio and market data. Use for calculations over price history, technical indicators, drawdown, volatility, concentration, comparisons, and other numerical work. Python should import pholio_sdk as pholio and finish with pholio.output.write(summary, result, artifacts=...). The summary must be one short sentence describing what was done. Optional artifacts can include metric_grid, table, line_chart, area_chart, bar_chart, donut_chart, event_timeline, or callout payloads for UI rendering. Do not use for trade execution or portfolio writes.",
     inputSchema: runAnalysisInput,
-    execute: async ({ task, code }, { abortSignal }) => {
+    execute: async ({ task, code }, { abortSignal, toolCallId }) => {
       const runId = crypto.randomUUID()
       const startedAt = Date.now()
       let phase: AnalysisPhase = "sandbox_io"
@@ -235,6 +241,8 @@ export function createAnalysisTools(userId: string) {
           sandboxIoTimeoutMs: SANDBOX_IO_TIMEOUT_MS,
           sandboxStartupTimeoutMs: SANDBOX_PORT_READY_TIMEOUT_MS,
         })
+
+        reportProgress?.({ toolCallId, phase: "provisioning" })
 
         const apiToken = await createUserApiToken(userId)
         abortSignal?.throwIfAborted()
@@ -253,6 +261,7 @@ export function createAnalysisTools(userId: string) {
         )
 
         phase = "sandbox_io"
+        reportProgress?.({ toolCallId, phase: "uploading" })
         await withTimeout(
           sandbox.writeFile("/workspace/run_analysis.py", code),
           SANDBOX_IO_TIMEOUT_MS,
@@ -267,6 +276,7 @@ export function createAnalysisTools(userId: string) {
         })
 
         phase = "exec"
+        reportProgress?.({ toolCallId, phase: "running" })
         const result = await withTimeout(
           sandbox.exec("python3 /workspace/run_analysis.py", {
             cwd: "/workspace",
@@ -304,6 +314,7 @@ export function createAnalysisTools(userId: string) {
         }
 
         phase = "output"
+        reportProgress?.({ toolCallId, phase: "reading" })
         const output = await withTimeout(
           sandbox.readFile("/workspace/output.json"),
           SANDBOX_IO_TIMEOUT_MS,
