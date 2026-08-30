@@ -73,12 +73,14 @@ export async function runChatAgent({
   userId,
   threadId,
   modelKey: modelKeyOpt,
+  abortSignal,
 }: {
   messages: ChatMessage[]
   onEnd: GenerateTextOnEndCallback<ToolSet>
   userId: string
   threadId: string | null
   modelKey?: GeneralChatModelKey
+  abortSignal?: AbortSignal
 }) {
   const monthlySpend = await getMonthlySpend(userId)
   const limit = getMonthlyLimitUsd()
@@ -126,6 +128,7 @@ export async function runChatAgent({
       ...createAnalysisTools(userId),
     },
     messages: modelMessages,
+    abortSignal,
     stopWhen: [stopOnTerminalToolError, isStepCount(10)],
     timeout: {
       totalMs: CHAT_TOTAL_TIMEOUT_MS,

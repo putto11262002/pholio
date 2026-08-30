@@ -190,19 +190,28 @@ async function withTimeout<T>(
   message: string,
   phase: AnalysisPhase,
   onTimeout?: () => void,
+  abortSignal?: AbortSignal,
 ): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined
+  let onAbort: (() => void) | undefined
   const timeout = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => {
       onTimeout?.()
       reject(new AgentToolError(message, "terminal", "analysis_run_code", phase))
     }, timeoutMs)
   })
+  const aborted = new Promise<never>((_, reject) => {
+    if (!abortSignal) return
+    onAbort = () => reject(abortSignal.reason ?? new DOMException("The operation was aborted", "AbortError"))
+    if (abortSignal.aborted) onAbort()
+    else abortSignal.addEventListener("abort", onAbort, { once: true })
+  })
 
   try {
-    return await Promise.race([promise, timeout])
+    return await Promise.race([promise, timeout, aborted])
   } finally {
     if (timeoutId) clearTimeout(timeoutId)
+    if (onAbort) abortSignal?.removeEventListener("abort", onAbort)
   }
 }
 
@@ -212,11 +221,12 @@ export function createAnalysisTools(userId: string) {
     description:
       "Run bounded Python analysis over portfolio and market data. Use for calculations over price history, technical indicators, drawdown, volatility, concentration, comparisons, and other numerical work. Python should import pholio_sdk as pholio and finish with pholio.output.write(summary, result, artifacts=...). The summary must be one short sentence describing what was done. Optional artifacts can include metric_grid, table, line_chart, area_chart, bar_chart, donut_chart, event_timeline, or callout payloads for UI rendering. Do not use for trade execution or portfolio writes.",
     inputSchema: runAnalysisInput,
-    execute: async ({ task, code }) => {
+    execute: async ({ task, code }, { abortSignal }) => {
       const runId = crypto.randomUUID()
       const startedAt = Date.now()
       let phase: AnalysisPhase = "sandbox_io"
       try {
+        abortSignal?.throwIfAborted()
         logAnalysis("start", {
           runId,
           task,
@@ -227,6 +237,7 @@ export function createAnalysisTools(userId: string) {
         })
 
         const apiToken = await createUserApiToken(userId)
+        abortSignal?.throwIfAborted()
 
         const sandbox = getSandbox<AnalysisSandbox>(
           env.ANALYSIS_SANDBOX,
@@ -247,6 +258,8 @@ export function createAnalysisTools(userId: string) {
           SANDBOX_IO_TIMEOUT_MS,
           `Timed out writing analysis code after ${SANDBOX_IO_TIMEOUT_MS}ms`,
           "sandbox_io",
+          undefined,
+          abortSignal,
         )
         logAnalysis("files_written", {
           runId,
@@ -263,10 +276,13 @@ export function createAnalysisTools(userId: string) {
               PHOLIO_API_BASE_URL: env.PHOLIO_API_BASE_URL,
               PHOLIO_API_TOKEN: apiToken,
             },
+            signal: abortSignal,
           }),
           EXEC_TIMEOUT_MS + 2_000,
           `Python execution timed out after ${EXEC_TIMEOUT_MS}ms`,
           "exec",
+          undefined,
+          abortSignal,
         )
         logAnalysis("exec_finished", {
           runId,
@@ -293,6 +309,8 @@ export function createAnalysisTools(userId: string) {
           SANDBOX_IO_TIMEOUT_MS,
           `Timed out reading analysis output after ${SANDBOX_IO_TIMEOUT_MS}ms`,
           "output",
+          undefined,
+          abortSignal,
         )
         const parsed = parseAnalysisOutput(output.content)
         logAnalysis("output_valid", {
@@ -318,6 +336,14 @@ export function createAnalysisTools(userId: string) {
           stderr: clip(result.stderr, 2_000),
         }
       } catch (err) {
+        if (abortSignal?.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+          logAnalysis("cancelled", {
+            runId,
+            phase,
+            durationMs: Date.now() - startedAt,
+          })
+          throw err
+        }
         const error = err instanceof Error ? err.message : String(err)
         const failurePhase = err instanceof AgentToolError ? err.phase ?? phase : phase
         const details = err instanceof AgentToolError ? err.details : undefined
