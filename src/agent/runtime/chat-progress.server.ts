@@ -35,6 +35,14 @@ export type ChatProgressCallbacks = {
   failed: (message?: string) => void
 }
 
+export function settleChatProgress(
+  progress: Pick<ChatProgressCallbacks, "completed" | "cancelled">,
+  aborted: boolean,
+) {
+  if (aborted) progress.cancelled()
+  else progress.completed()
+}
+
 export function createChatProgressEmitter({
   runId,
   write,

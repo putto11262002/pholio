@@ -7,6 +7,7 @@ import {
   createSelectionIntentTracker,
   initialTurnGenerationState,
   latestTurnGeneration,
+  requestTurnCancellation,
   resolveChatLifecycle,
   retryTurn,
 } from "./chat-lifecycle"
@@ -17,6 +18,7 @@ const baseLifecycle = {
   isStreaming: false,
   isRecovering: false,
   isToolContinuation: false,
+  isStopping: false,
   hasCompletedTurn: false,
   wasCancelled: false,
   hasError: false,
@@ -29,6 +31,7 @@ describe("resolveChatLifecycle", () => {
     [{ status: "streaming" as const, isStreaming: true }, "streaming"],
     [{ isRecovering: true }, "recovering"],
     [{ isToolContinuation: true, isStreaming: true }, "continuing"],
+    [{ isStopping: true, status: "ready" as const }, "stopping"],
     [{ hasCompletedTurn: true }, "completed"],
     [
       { wasCancelled: true, hasCompletedTurn: true, hasError: true },
@@ -76,7 +79,10 @@ describe("turn generations", () => {
     const firstTurn = beginTurn(initialTurnGenerationState)
     const completions = createTurnGenerationQueue()
     completions.enqueue(firstTurn.current)
-    const stopped = cancelTurn(firstTurn, firstTurn.current)
+    const stopped = cancelTurn(
+      requestTurnCancellation(firstTurn, firstTurn.current),
+      firstTurn.current,
+    )
     const secondTurn = beginTurn(stopped)
     completions.enqueue(secondTurn.current)
 
@@ -130,6 +136,45 @@ describe("turn generations", () => {
     const current = beginTurn(openedHistoricalThread)
     expect(completeTurn(current, current.current).completed).toBe(current.current)
     expect(completeTurn(current, current.current - 1)).toEqual(current)
+  })
+
+  it("does not mark a turn cancelled before explicit stopping is acknowledged", () => {
+    const running = beginTurn(initialTurnGenerationState)
+    const stopping = requestTurnCancellation(running, running.current)
+
+    expect(stopping.stopping).toBe(running.current)
+    expect(stopping.cancelled).toBeNull()
+    expect(cancelTurn(running, running.current)).toEqual(running)
+    expect(cancelTurn(stopping, stopping.current)).toMatchObject({
+      stopping: null,
+      cancelled: stopping.current,
+    })
+  })
+
+  it("ignores late completion while stopping and after cancellation", () => {
+    const running = beginTurn(initialTurnGenerationState)
+    const stopping = requestTurnCancellation(running, running.current)
+    const cancelled = cancelTurn(stopping, stopping.current)
+
+    expect(completeTurn(stopping, stopping.current)).toEqual(stopping)
+    expect(completeTurn(cancelled, cancelled.current)).toEqual(cancelled)
+  })
+
+  it("allows a fresh generation only after cancellation is terminal", () => {
+    const running = beginTurn(initialTurnGenerationState)
+    const stopping = requestTurnCancellation(running, running.current)
+    const cancelled = cancelTurn(stopping, stopping.current)
+    const next = beginTurn(cancelled)
+
+    expect(next.current).toBe(cancelled.current + 1)
+    expect(next.stopping).toBeNull()
+    expect(next.cancelled).toBeNull()
+  })
+
+  it("does not treat navigation or disconnect cleanup as explicit cancellation", () => {
+    const running = beginTurn(initialTurnGenerationState)
+
+    expect(cancelTurn(running, running.current)).toEqual(running)
   })
 
   it("recovers the active generation from persisted messages after reload", () => {

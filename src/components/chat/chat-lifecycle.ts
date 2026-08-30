@@ -6,6 +6,7 @@ export type ChatLifecycleState =
   | "streaming"
   | "recovering"
   | "continuing"
+  | "stopping"
   | "completed"
   | "cancelled"
   | "failed"
@@ -17,6 +18,7 @@ export type ChatLifecycleInput = {
   isStreaming: boolean
   isRecovering: boolean
   isToolContinuation: boolean
+  isStopping: boolean
   hasCompletedTurn: boolean
   wasCancelled: boolean
   hasError: boolean
@@ -25,6 +27,7 @@ export type ChatLifecycleInput = {
 export function resolveChatLifecycle(
   input: ChatLifecycleInput
 ): ChatLifecycleState {
+  if (input.isStopping) return "stopping"
   if (input.wasCancelled) return "cancelled"
   if (input.hasError || input.status === "error") return "failed"
   if (input.isRecovering) return "recovering"
@@ -59,32 +62,52 @@ export function createSelectionIntentTracker() {
 
 export type TurnGenerationState = {
   current: number
+  stopping: number | null
   cancelled: number | null
   completed: number | null
 }
 
 export const initialTurnGenerationState: TurnGenerationState = {
   current: 0,
+  stopping: null,
   cancelled: null,
   completed: null,
 }
 
 export function beginTurn(state: TurnGenerationState): TurnGenerationState {
-  return { current: state.current + 1, cancelled: null, completed: null }
+  return { current: state.current + 1, stopping: null, cancelled: null, completed: null }
 }
 
 export function retryTurn(state: TurnGenerationState): TurnGenerationState {
   return state.current > 0
-    ? { ...state, cancelled: null, completed: null }
+    ? { ...state, stopping: null, cancelled: null, completed: null }
     : beginTurn(state)
 }
 
+export function requestTurnCancellation(state: TurnGenerationState, generation: number): TurnGenerationState {
+  return generation === state.current && state.cancelled !== generation
+    ? { ...state, stopping: generation, completed: null }
+    : state
+}
+
 export function cancelTurn(state: TurnGenerationState, generation: number): TurnGenerationState {
-  return generation === state.current ? { ...state, cancelled: generation, completed: null } : state
+  return generation === state.current && state.stopping === generation
+    ? { ...state, stopping: null, cancelled: generation, completed: null }
+    : state
+}
+
+export function failTurnCancellation(state: TurnGenerationState, generation: number): TurnGenerationState {
+  return generation === state.current && state.stopping === generation
+    ? { ...state, stopping: null }
+    : state
 }
 
 export function completeTurn(state: TurnGenerationState, generation: number): TurnGenerationState {
-  return generation === state.current ? { ...state, cancelled: null, completed: generation } : state
+  return generation === state.current
+    && state.stopping !== generation
+    && state.cancelled !== generation
+    ? { ...state, stopping: null, cancelled: null, completed: generation }
+    : state
 }
 
 export function turnGenerationForFinishedMessage(

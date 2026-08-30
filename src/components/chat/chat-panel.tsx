@@ -49,9 +49,11 @@ import {
   completeTurn as completeTurnGeneration,
   createSelectionIntentTracker,
   createTurnGenerationQueue,
+  failTurnCancellation,
   initialTurnGenerationState,
   latestTurnGeneration,
   resolveChatLifecycle,
+  requestTurnCancellation,
   retryTurn,
   turnGenerationForFinishedMessage,
   type ChatConnectionState,
@@ -665,6 +667,7 @@ function LifecycleNotice({ state, error, onRetry }: { state: ChatLifecycleState;
     streaming: "Responding…",
     recovering: "Recovering response…",
     continuing: "Continuing after tools…",
+    stopping: "Stopping…",
     completed: "Complete",
     cancelled: "Cancelled — partial response kept.",
   }
@@ -679,7 +682,7 @@ function LifecycleNotice({ state, error, onRetry }: { state: ChatLifecycleState;
       </div>
     )
   }
-  const isActive = state === "connecting" || state === "waiting" || state === "streaming" || state === "recovering" || state === "continuing"
+  const isActive = state === "connecting" || state === "waiting" || state === "streaming" || state === "recovering" || state === "continuing" || state === "stopping"
   return (
     <div className="text-muted-foreground flex items-center gap-2 px-1 text-xs" aria-live="polite">
       {isActive ? <Loader2 className="size-3 animate-spin" /> : state === "cancelled" ? <Square className="size-3 fill-current" /> : <CheckCircle2 className="size-3" />}
@@ -787,7 +790,7 @@ type ConnectedChatProps = {
   onAutoTitle: (title: string) => void
 }
 
-function ConnectedChat({
+export function ConnectedChat({
   threadId, modelKey, providerOptions, activeTitle,
   initialMessage, onInitialMessageSent,
   onModelSelect, onThinkingSelect, onAutoTitle,
@@ -843,8 +846,11 @@ function ConnectedChat({
     cancelOnClientAbort: false,
     body: () => ({ modelKey, providerOptions }),
     onFinish: ({ message, messages: finishedMessages, isAbort }) => {
-      const generation = turnCompletionQueueRef.current.resolve(
-        turnGenerationForFinishedMessage(message.id, finishedMessages),
+      const generationFromMessage = turnGenerationForFinishedMessage(message.id, finishedMessages)
+      const generationFromQueue = turnCompletionQueueRef.current.resolve(generationFromMessage)
+      const current = turnStateRef.current
+      const generation = generationFromQueue ?? (
+        isAbort && current.stopping === current.current ? current.current : undefined
       )
       if (generation === undefined) return
       transitionTurn((current) => isAbort
@@ -854,22 +860,23 @@ function ConnectedChat({
   })
 
   const wasCancelled = turnState.cancelled === turnState.current && turnState.current > 0
+  const isStopping = turnState.stopping === turnState.current && turnState.current > 0
   const hasCompletedTurn = status === "ready"
     && turnState.completed === turnState.current
     && turnState.current > 0
   const lifecycle = resolveChatLifecycle({
-    connectionState, status, isStreaming, isRecovering, isToolContinuation,
+    connectionState, status, isStreaming, isRecovering, isToolContinuation, isStopping,
     hasCompletedTurn, wasCancelled, hasError: Boolean(error || connectionError),
   })
-  const isBusy = !wasCancelled && (
+  const isBusy = isStopping || (!wasCancelled && (
     status === "submitted" || status === "streaming" || isStreaming || isRecovering || isToolContinuation
-  )
+  ))
 
   useEffect(() => {
     if (turnStateRef.current.current > 0) return
     const persistedGeneration = latestTurnGeneration(messages)
     if (persistedGeneration !== undefined) {
-      transitionTurn(() => ({ current: persistedGeneration, cancelled: null, completed: null }))
+      transitionTurn(() => ({ current: persistedGeneration, stopping: null, cancelled: null, completed: null }))
       return
     }
     if (isStreaming || isRecovering || isToolContinuation || status === "submitted" || status === "streaming") {
@@ -962,10 +969,15 @@ function ConnectedChat({
     sendMessage({ text, metadata: { turnGeneration } })
   }
 
-  function cancelTurn() {
+  async function cancelTurn() {
     const generation = turnStateRef.current.current
-    transitionTurn((current) => cancelTurnGeneration(current, generation))
-    void stop()
+    const requested = transitionTurn((current) => requestTurnCancellation(current, generation))
+    if (requested.stopping !== generation) return
+    try {
+      await stop()
+    } catch {
+      transitionTurn((current) => failTurnCancellation(current, generation))
+    }
   }
 
   function retry() {
@@ -1092,8 +1104,9 @@ function ConnectedChat({
                 )}
               </div>
               <InputGroupButton size="icon-sm" variant="default" onClick={isBusy ? cancelTurn : submit}
-                disabled={!isBusy && !input.trim()} aria-label={isBusy ? "Stop response" : "Send message"}>
-                {isBusy ? <Square className="size-3 fill-current" /> : <ArrowUp />}
+                disabled={isStopping || (!isBusy && !input.trim())}
+                aria-label={isStopping ? "Stopping response" : isBusy ? "Stop response" : "Send message"}>
+                {isStopping ? <Loader2 className="animate-spin" /> : isBusy ? <Square className="size-3 fill-current" /> : <ArrowUp />}
               </InputGroupButton>
             </InputGroupAddon>
           </InputGroup>

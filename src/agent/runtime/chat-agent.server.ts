@@ -11,6 +11,7 @@ import { getThreadOwnerUserId } from "@/thread/api.server"
 import {
   createChatProgressEmitter,
   createChatProgressRunId,
+  settleChatProgress,
 } from "@/agent/runtime/chat-progress.server"
 import { createChatTurnDiagnostics } from "@/agent/runtime/chat-failure.server"
 
@@ -71,7 +72,7 @@ export class ChatAgent extends AIChatAgent<Env> {
                 if (done) break
                 writer.write(value)
               }
-              progress.completed()
+              settleChatProgress(progress.callbacks, Boolean(options?.abortSignal?.aborted))
             } catch (error) {
               if (!options?.abortSignal?.aborted) diagnostics.recordFailure(error, "ui_stream")
               throw error
