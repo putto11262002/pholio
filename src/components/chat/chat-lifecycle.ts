@@ -57,27 +57,6 @@ export function createSelectionIntentTracker() {
   }
 }
 
-export async function resolveCreatedThreadIntent({
-  id,
-  intent,
-  tracker,
-  select,
-  remove,
-}: {
-  id: string
-  intent: number
-  tracker: ReturnType<typeof createSelectionIntentTracker>
-  select: (id: string) => void
-  remove: (id: string) => Promise<unknown>
-}) {
-  if (tracker.isCurrent(intent)) {
-    select(id)
-    return "selected" as const
-  }
-  await remove(id)
-  return "removed" as const
-}
-
 export type TurnGenerationState = {
   current: number
   cancelled: number | null

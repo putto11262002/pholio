@@ -7,7 +7,6 @@ import {
   createSelectionIntentTracker,
   initialTurnGenerationState,
   latestTurnGeneration,
-  resolveCreatedThreadIntent,
   resolveChatLifecycle,
   retryTurn,
 } from "./chat-lifecycle"
@@ -70,25 +69,6 @@ describe("createSelectionIntentTracker", () => {
     expect(tracker.isCurrent(createIntent)).toBe(true)
   })
 
-  it("removes a stale successful creation without selecting the ghost thread", async () => {
-    const tracker = createSelectionIntentTracker()
-    const createIntent = tracker.supersede()
-    const selected: Array<string> = []
-    const removed: Array<string> = []
-    tracker.supersede()
-
-    const result = await resolveCreatedThreadIntent({
-      id: "stale-thread",
-      intent: createIntent,
-      tracker,
-      select: (id) => selected.push(id),
-      remove: async (id) => removed.push(id),
-    })
-
-    expect(result).toBe("removed")
-    expect(selected).toEqual([])
-    expect(removed).toEqual(["stale-thread"])
-  })
 })
 
 describe("turn generations", () => {
