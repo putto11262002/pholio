@@ -1,5 +1,5 @@
 import { useRef, useEffect, useLayoutEffect, useState, Suspense } from "react"
-import { useMutation } from "@tanstack/react-query"
+import { useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query"
 import { useAgent } from "agents/react"
 import { useAgentChat } from "@cloudflare/ai-chat/react"
 import { AlertCircle, ArrowUp, CheckCircle2, ChevronDown, Loader2, RotateCcw, Square } from "lucide-react"
@@ -33,7 +33,6 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card"
 import {
   generalChatModels,
-  DEFAULT_GENERAL_CHAT_MODEL,
   resolveGeneralChatModelKey,
   type GeneralChatModel,
   type GeneralChatModelKey,
@@ -41,8 +40,9 @@ import {
 } from "@/agent/general-chat-models"
 import { useAuth } from "@clerk/tanstack-react-start"
 import { ConversationSidebar, ConversationToggle } from "@/components/chat/thread-switcher"
-import { createThreadFn, deleteThreadFn, getThreadFn, updateThreadFn } from "@/thread/functions"
+import { createThreadFn, getThreadFn, updateThreadFn } from "@/thread/functions"
 import type { Thread } from "@/thread/types"
+import { prependThreadToInfiniteData, type ThreadPage } from "@/thread/cache"
 import {
   beginTurn,
   cancelTurn as cancelTurnGeneration,
@@ -51,13 +51,25 @@ import {
   createTurnGenerationQueue,
   initialTurnGenerationState,
   latestTurnGeneration,
-  resolveCreatedThreadIntent,
   resolveChatLifecycle,
   retryTurn,
   turnGenerationForFinishedMessage,
   type ChatConnectionState,
   type ChatLifecycleState,
 } from "@/components/chat/chat-lifecycle"
+import {
+  beginDraftCreation,
+  chatSessionKey,
+  initialChatSelection,
+  markInitialMessageDispatched,
+  selectNewDraft,
+  selectPersistedThread,
+  settleDraftCreation,
+  updateSelectionModel,
+  updateSelectionThinking,
+  updateSelectionTitle,
+  type ChatSelection,
+} from "@/components/chat/chat-selection"
 
 const THREAD_LS_KEY = "activeThreadId"
 
@@ -760,7 +772,7 @@ export function Message({ message, isStreaming }: { message: ChatMessage; isStre
 }
 
 // ---------------------------------------------------------------------------
-// ConnectedChat — keyed by threadId so it fully remounts on thread switch
+// ConnectedChat — keyed by selection version so every session fully remounts
 // ---------------------------------------------------------------------------
 
 type ConnectedChatProps = {
@@ -1260,41 +1272,33 @@ function PreChatInput({ modelKey, providerOptions, isLoading, onModelSelect, onT
 
 export function ChatPanel() {
   const { userId } = useAuth()
+  const queryClient = useQueryClient()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [initialized, setInitialized] = useState(false)
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
-  const [activeTitle, setActiveTitle] = useState<string | null>(null)
-  const [modelKey, setModelKey] = useState<GeneralChatModelKey>(DEFAULT_GENERAL_CHAT_MODEL)
-  const [providerOptions, setProviderOptions] = useState<ProviderOptions>({})
-  const [pendingMessage, setPendingMessage] = useState<string | null>(null)
-  const [creatingIntent, setCreatingIntent] = useState<number | null>(null)
+  const [selection, setSelection] = useState<ChatSelection>(initialChatSelection)
   const selectionIntentRef = useRef(createSelectionIntentTracker())
 
   const createMutation = useMutation({
     mutationFn: (creation: { intent: number; text: string; modelKey: GeneralChatModelKey; providerOptions: ProviderOptions }) =>
       createThreadFn({ data: { modelKey: creation.modelKey, providerOptions: creation.providerOptions } }),
-    onSuccess: async (id, creation) => {
-      await resolveCreatedThreadIntent({
-        id,
-        intent: creation.intent,
-        tracker: selectionIntentRef.current,
-        select: (selectedId) => {
-          setPendingMessage(creation.text)
-          setActiveThreadId(selectedId)
-          setActiveTitle(null)
-          localStorage.setItem(THREAD_LS_KEY, selectedId)
-        },
-        remove: async (staleId) => {
-          try {
-            await deleteThreadFn({ data: { id: staleId } })
-          } catch (error) {
-            console.error("Failed to remove stale conversation", error)
-          }
-        },
-      })
+    onSuccess: (created, creation) => {
+      const queryKey = ["threads", userId ?? ""] as const
+      queryClient.setQueryData(
+        queryKey,
+        (current: InfiniteData<ThreadPage, string | undefined> | undefined) =>
+          prependThreadToInfiniteData(current, created),
+      )
+      if (selectionIntentRef.current.isCurrent(creation.intent)) {
+        setSelection((current) => selectPersistedThread(current, {
+          ...created,
+          modelKey: resolveGeneralChatModelKey(created.modelKey),
+        }, creation.text))
+        localStorage.setItem(THREAD_LS_KEY, created.id)
+      }
+      void queryClient.invalidateQueries({ queryKey })
     },
     onSettled: (_data, _error, creation) => {
-      if (selectionIntentRef.current.isCurrent(creation.intent)) setCreatingIntent(null)
+      setSelection((current) => settleDraftCreation(current, creation.intent))
     },
   })
 
@@ -1312,10 +1316,12 @@ export function ChatPanel() {
           if (!selectionIntentRef.current.isCurrent(restoreIntent)) return
           if (t) {
             const resolvedModelKey = resolveGeneralChatModelKey(t.modelKey)
-            setActiveThreadId(t.id)
-            setActiveTitle(t.title ?? null)
-            setModelKey(resolvedModelKey)
-            setProviderOptions({})
+            setSelection((current) => selectPersistedThread(current, {
+              id: t.id,
+              title: t.title ?? null,
+              modelKey: resolvedModelKey,
+              providerOptions: {},
+            }))
             localStorage.setItem(THREAD_LS_KEY, t.id)
           } else {
             localStorage.removeItem(THREAD_LS_KEY)
@@ -1333,55 +1339,52 @@ export function ChatPanel() {
 
   function handleThreadSelect(t: Thread) {
     selectionIntentRef.current.supersede()
-    setCreatingIntent(null)
     const resolvedModelKey = resolveGeneralChatModelKey(t.modelKey)
-    setActiveThreadId(t.id)
-    setActiveTitle(t.title ?? null)
-    setModelKey(resolvedModelKey)
-    setProviderOptions({})
-    setPendingMessage(null)
+    setSelection((current) => selectPersistedThread(current, {
+      id: t.id,
+      title: t.title ?? null,
+      modelKey: resolvedModelKey,
+      providerOptions: {},
+    }))
     localStorage.setItem(THREAD_LS_KEY, t.id)
   }
 
   function handleNewConversation() {
     selectionIntentRef.current.supersede()
-    setCreatingIntent(null)
-    setActiveThreadId(null)
-    setActiveTitle(null)
-    setModelKey(DEFAULT_GENERAL_CHAT_MODEL)
-    setProviderOptions({})
-    setPendingMessage(null)
+    setSelection(selectNewDraft)
     localStorage.removeItem(THREAD_LS_KEY)
   }
 
   function handleModelSelect(key: GeneralChatModelKey) {
     const defaultOpts = (generalChatModels[key] as GeneralChatModel).thinking?.default ?? {}
-    setModelKey(key)
-    setProviderOptions(defaultOpts)
-    if (activeThreadId) {
-      updateMutation.mutate({ data: { id: activeThreadId, modelKey: key, providerOptions: defaultOpts } })
+    setSelection((current) => updateSelectionModel(current, key, defaultOpts))
+    if (selection.kind === "thread") {
+      updateMutation.mutate({ data: { id: selection.threadId, modelKey: key, providerOptions: defaultOpts } })
     }
   }
 
   function handleThinkingSelect(opts: ProviderOptions) {
-    setProviderOptions(opts)
-    if (activeThreadId) {
-      updateMutation.mutate({ data: { id: activeThreadId, providerOptions: opts } })
+    setSelection((current) => updateSelectionThinking(current, opts))
+    if (selection.kind === "thread") {
+      updateMutation.mutate({ data: { id: selection.threadId, providerOptions: opts } })
     }
   }
 
-  function handleAutoTitle(title: string) {
-    setActiveTitle(title)
-    if (activeThreadId) {
-      updateMutation.mutate({ data: { id: activeThreadId, title } })
-    }
+  function handleAutoTitle(version: number, threadId: string, title: string) {
+    setSelection((current) => updateSelectionTitle(current, version, threadId, title))
+    updateMutation.mutate({ data: { id: threadId, title } })
   }
 
   // Called from the pre-chat input — create thread then hand off the message
   function handleFirstMessage(text: string) {
     const intent = selectionIntentRef.current.supersede()
-    setCreatingIntent(intent)
-    createMutation.mutate({ intent, text, modelKey, providerOptions })
+    setSelection((current) => beginDraftCreation(current, intent))
+    createMutation.mutate({
+      intent,
+      text,
+      modelKey: selection.modelKey,
+      providerOptions: selection.providerOptions,
+    })
   }
 
   return (
@@ -1396,35 +1399,40 @@ export function ChatPanel() {
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         userId={userId ?? ""}
-        activeThreadId={activeThreadId}
+        activeThreadId={selection.kind === "thread" ? selection.threadId : null}
         onSelect={handleThreadSelect}
         onNew={handleNewConversation}
       />
 
-      {initialized && !activeThreadId && (
+      {initialized && selection.kind === "draft" && (
         <PreChatInput
-          modelKey={modelKey}
-          providerOptions={providerOptions}
-          isLoading={creatingIntent !== null}
+          key={selection.version}
+          modelKey={selection.modelKey}
+          providerOptions={selection.providerOptions}
+          isLoading={selection.creatingIntent !== null}
           onModelSelect={handleModelSelect}
           onThinkingSelect={handleThinkingSelect}
           onSubmit={handleFirstMessage}
         />
       )}
 
-      {initialized && activeThreadId && (
-        <Suspense fallback={<ChatSkeleton modelKey={modelKey} providerOptions={providerOptions} />}>
+      {initialized && selection.kind === "thread" && (
+        <Suspense fallback={<ChatSkeleton modelKey={selection.modelKey} providerOptions={selection.providerOptions} />}>
           <ConnectedChat
-            key={activeThreadId}
-            threadId={activeThreadId}
-            modelKey={modelKey}
-            providerOptions={providerOptions}
-            activeTitle={activeTitle}
-            initialMessage={pendingMessage}
-            onInitialMessageSent={() => setPendingMessage(null)}
+            key={chatSessionKey(selection)}
+            threadId={selection.threadId}
+            modelKey={selection.modelKey}
+            providerOptions={selection.providerOptions}
+            activeTitle={selection.title}
+            initialMessage={selection.initialMessage}
+            onInitialMessageSent={() => setSelection((current) => markInitialMessageDispatched(
+              current,
+              selection.version,
+              selection.threadId,
+            ))}
             onModelSelect={handleModelSelect}
             onThinkingSelect={handleThinkingSelect}
-            onAutoTitle={handleAutoTitle}
+            onAutoTitle={(title) => handleAutoTitle(selection.version, selection.threadId, title)}
           />
         </Suspense>
       )}

@@ -3,11 +3,11 @@ import { getDb } from "@/db/index.server"
 import { thread } from "@/db/schema"
 import type { NewThread } from "./types"
 
-export async function createThread(data: Omit<NewThread, "id" | "createdAt" | "updatedAt">): Promise<string> {
+export async function createThread(data: Omit<NewThread, "id" | "createdAt" | "updatedAt">) {
   const db = getDb()
   const id = crypto.randomUUID()
-  await db.insert(thread).values({ ...data, id })
-  return id
+  const [created] = await db.insert(thread).values({ ...data, id }).returning()
+  return created
 }
 
 export async function listThreads(userId: string, opts?: { cursor?: string; limit?: number }) {
