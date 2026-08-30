@@ -239,6 +239,96 @@ describe("ConnectedChat cancellation", () => {
     expect((screen.getByPlaceholderText("Ask about your portfolio…") as HTMLTextAreaElement).disabled).toBe(false)
   })
 
+  it("classifies the interrupted transport emitted by Stop as cancellation", async () => {
+    const settlement = deferred<{ status: "stable" | "timeout" | "unavailable" }>()
+    agent.call.mockReturnValueOnce(settlement.promise)
+    hook.state = { ...hook.state, status: "streaming", isStreaming: true }
+    const view = renderConnectedChat()
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop response" }))
+    const partialAssistant = {
+      id: "assistant-interrupted",
+      role: "assistant",
+      parts: [{ type: "text", text: "Partial answer" }],
+    } as ChatMessage
+    act(() => hook.options?.onFinish({
+      message: partialAssistant,
+      messages: [userMessage, partialAssistant],
+      isAbort: false,
+    }))
+
+    hook.state = {
+      ...hook.state,
+      status: "error",
+      isStreaming: false,
+      error: new Error("The response ended unexpectedly."),
+    }
+    view.rerender(connectedChatElement())
+    expect(screen.getByRole("alert").textContent).toContain("response ended unexpectedly")
+    expect((screen.getByPlaceholderText("Ask about your portfolio…") as HTMLTextAreaElement).disabled).toBe(true)
+
+    await act(async () => {
+      settlement.resolve({ status: "stable" })
+      await settlement.promise
+    })
+
+    await waitFor(() => expect(
+      screen.getByText("Cancelled — partial response kept."),
+    ).toBeTruthy())
+    expect(hook.state.clearError).toHaveBeenCalledOnce()
+    expect((screen.getByPlaceholderText("Ask about your portfolio…") as HTMLTextAreaElement).disabled).toBe(false)
+
+    hook.state = { ...hook.state, status: "ready", error: null }
+    view.rerender(connectedChatElement())
+    fireEvent.change(screen.getByPlaceholderText("Ask about your portfolio…"), {
+      target: { value: "Follow up" },
+    })
+    fireEvent.keyDown(screen.getByPlaceholderText("Ask about your portfolio…"), {
+      key: "Enter",
+      shiftKey: false,
+    })
+    expect(hook.state.sendMessage).toHaveBeenCalledWith({
+      text: "Follow up",
+      metadata: { turnGeneration: 2 },
+    })
+  })
+
+  it("reclassifies a boundary finish when the transport failure arrives after settlement", async () => {
+    hook.state = { ...hook.state, status: "streaming", isStreaming: true }
+    const view = renderConnectedChat()
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop response" }))
+    const partialAssistant = {
+      id: "assistant-late-transport-failure",
+      role: "assistant",
+      parts: [{ type: "text", text: "Partial answer" }],
+    } as ChatMessage
+    await act(async () => {
+      hook.options?.onFinish({
+        message: partialAssistant,
+        messages: [userMessage, partialAssistant],
+        isAbort: false,
+      })
+      await (hook.state.stop as ReturnType<typeof vi.fn>).mock.results[0]?.value
+    })
+
+    hook.state = { ...hook.state, status: "ready", isStreaming: false }
+    view.rerender(connectedChatElement())
+    await waitFor(() => expect(screen.getByText("Complete")).toBeTruthy())
+
+    hook.state = {
+      ...hook.state,
+      status: "error",
+      error: new Error("The response ended unexpectedly."),
+    }
+    view.rerender(connectedChatElement())
+
+    await waitFor(() => expect(
+      screen.getByText("Cancelled — partial response kept."),
+    ).toBeTruthy())
+    expect(hook.state.clearError).toHaveBeenCalledOnce()
+  })
+
   it("preserves a normal finish recorded just before a stale Stop click", async () => {
     hook.state = { ...hook.state, status: "streaming", isStreaming: true }
     renderConnectedChat()

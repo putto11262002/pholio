@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   beginTurn,
+  cancelTurnAfterTransportFailure,
   cancelTurn,
   clearTurnCompletion,
   completeTurn,
@@ -189,6 +190,31 @@ describe("turn generations", () => {
     expect(settleTurnCancellation(finished, stopping.current)).toMatchObject({
       stopping: null,
       completed: stopping.current,
+    })
+  })
+
+  it("treats an interrupted transport as cancellation after the server settles", () => {
+    const running = beginTurn(initialTurnGenerationState)
+    const stopping = requestTurnCancellation(running, running.current)
+    const misleadingFinish = completeTurn(stopping, stopping.current)
+    const serverSettled = settleTurnCancellation(misleadingFinish, stopping.current)
+
+    expect(serverSettled).toMatchObject({
+      stopping: null,
+      completionAcknowledged: stopping.current,
+      completed: stopping.current,
+    })
+
+    expect(cancelTurnAfterTransportFailure(
+      serverSettled,
+      stopping.current,
+    )).toMatchObject({
+      stopping: null,
+      abortAcknowledged: stopping.current,
+      completionAcknowledged: null,
+      serverSettled: stopping.current,
+      cancelled: stopping.current,
+      completed: null,
     })
   })
 

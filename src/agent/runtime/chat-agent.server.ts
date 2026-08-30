@@ -3,7 +3,7 @@ import { MessageType } from "@cloudflare/ai-chat/types"
 import { createUIMessageStream, createUIMessageStreamResponse, toUIMessageStream } from "ai"
 import { callable } from "agents"
 import type { ChatResponseResult, OnChatMessageOptions } from "@cloudflare/ai-chat"
-import type { GenerateTextOnEndCallback, ToolSet } from "ai"
+import type { GenerateTextOnEndCallback, InferUIMessageChunk, ToolSet } from "ai"
 import type { Connection, WSMessage } from "agents"
 import type { ChatMessage } from "@/agent/chat-message"
 import {
@@ -17,7 +17,6 @@ import { getThreadOwnerUserId } from "@/thread/api.server"
 import {
   createChatProgressEmitter,
   createChatProgressRunId,
-  settleChatProgress,
 } from "@/agent/runtime/chat-progress.server"
 import { createChatTurnDiagnostics } from "@/agent/runtime/chat-failure.server"
 import { authorizeChatAgentRequest } from "@/agent/runtime/chat-agent-auth.server"
@@ -93,6 +92,40 @@ function withTurnUserMessageId(
       body: JSON.stringify({ ...body, [TURN_USER_MESSAGE_ID_BODY_KEY]: userMessageId }),
     },
   })
+}
+
+export async function forwardChatUIStream({
+  stream,
+  abortSignal,
+  write,
+  completed,
+  cancelled,
+}: {
+  stream: ReadableStream<InferUIMessageChunk<ChatMessage>>
+  abortSignal?: AbortSignal
+  write: (chunk: InferUIMessageChunk<ChatMessage>) => void
+  completed: () => void
+  cancelled: () => void
+}): Promise<void> {
+  const reader = stream.getReader()
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (abortSignal?.aborted && value.type === "error") continue
+      write(value)
+    }
+    if (abortSignal?.aborted) cancelled()
+    else completed()
+  } catch (error) {
+    if (abortSignal?.aborted) {
+      cancelled()
+      return
+    }
+    throw error
+  } finally {
+    reader.releaseLock()
+  }
 }
 
 export class ChatAgent extends AIChatAgent<Env> {
@@ -290,7 +323,6 @@ export class ChatAgent extends AIChatAgent<Env> {
               sendReasoning: false,
               onError: (error) => {
                 if (options?.abortSignal?.aborted) {
-                  progress.cancelled()
                   return MISSING_STREAM_ERROR
                 }
                 diagnostics.recordFailure(error, "ui_stream")
@@ -298,26 +330,20 @@ export class ChatAgent extends AIChatAgent<Env> {
                 return safeStreamError
               },
             })
-            const reader = responseStream.getReader()
-            try {
-              while (true) {
-                const { done, value } = await reader.read()
-                if (done) break
-                writer.write(value)
-              }
-              settleChatProgress(progress.callbacks, Boolean(options?.abortSignal?.aborted))
-            } catch (error) {
-              if (!options?.abortSignal?.aborted) diagnostics.recordFailure(error, "ui_stream")
-              throw error
-            } finally {
-              reader.releaseLock()
-            }
+            await forwardChatUIStream({
+              stream: responseStream,
+              abortSignal: options?.abortSignal,
+              write: (chunk) => writer.write(chunk),
+              completed: progress.completed,
+              cancelled: progress.cancelled,
+            })
           } catch (error) {
-            if (options?.abortSignal?.aborted) progress.cancelled()
-            else {
-              diagnostics.recordFailure(error)
-              progress.failed(MISSING_STREAM_ERROR)
+            if (options?.abortSignal?.aborted) {
+              progress.cancelled()
+              return
             }
+            diagnostics.recordFailure(error)
+            progress.failed(MISSING_STREAM_ERROR)
             throw error
           }
         },
