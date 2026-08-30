@@ -5,9 +5,21 @@ import type { ChatMessage } from "@/agent/chat-message"
 import {
   createChatProgressEmitter,
   createChatProgressRunId,
+  settleChatProgress,
 } from "./chat-progress.server"
 
 describe("chat progress emitter", () => {
+  it("persists cancellation when an explicitly stopped stream ends normally", () => {
+    const events: Array<string> = []
+
+    settleChatProgress({
+      completed: () => events.push("completed"),
+      cancelled: () => events.push("cancelled"),
+    }, true)
+
+    expect(events).toEqual(["cancelled"])
+  })
+
   it("writes stable durable ordinals and exactly one terminal event", () => {
     const chunks: Array<InferUIMessageChunk<ChatMessage>> = []
     const emitter = createChatProgressEmitter({ runId: "request-7", write: (chunk) => chunks.push(chunk) })
