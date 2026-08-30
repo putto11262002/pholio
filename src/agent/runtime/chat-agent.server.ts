@@ -43,6 +43,7 @@ export class ChatAgent extends AIChatAgent<Env> {
               modelKey,
               abortSignal: options?.abortSignal,
               progress: progress.callbacks,
+              defer: (task) => this.ctx.waitUntil(task),
             })
 
             const responseStream = toUIMessageStream<ToolSet, ChatMessage>({

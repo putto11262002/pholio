@@ -64,6 +64,64 @@ describe("tool errors in a real AI SDK stream", () => {
     expect(await result.text).toBe("I recovered with the available context.")
   })
 
+  it.each([
+    ["capacity", true, 1_250],
+    ["interrupted", false, undefined],
+  ] as const)("preserves %s AgentToolError metadata in a real stream", async (category, retryable, retryAfterMs) => {
+    let call = 0
+    let secondPrompt = ""
+    const model = new MockLanguageModelV4({
+      doStream: async (options) => {
+        call += 1
+        if (call === 1) {
+          return {
+            stream: simulateReadableStream({ chunks: [
+              { type: "stream-start", warnings: [] },
+              { type: "tool-call", toolCallId: "analysis-error", toolName: "analysis", input: "{}" },
+              { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
+            ] }),
+          }
+        }
+        secondPrompt = JSON.stringify(options.prompt)
+        return {
+          stream: simulateReadableStream({ chunks: [
+            { type: "stream-start", warnings: [] },
+            { type: "text-start", id: "text-metadata" },
+            { type: "text-delta", id: "text-metadata", delta: "Handled." },
+            { type: "text-end", id: "text-metadata" },
+            { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+          ] }),
+        }
+      },
+    })
+    const result = streamText({
+      model,
+      prompt: "Analyze",
+      tools: {
+        analysis: tool({
+          inputSchema: z.object({}),
+          execute: async (): Promise<Record<string, never>> => {
+            throw new AgentToolError(
+              "Sandbox unavailable",
+              retryable ? "recoverable" : "terminal",
+              "analysis",
+              "exec",
+              { category, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) }
+            )
+          },
+        }),
+      },
+      experimental_transform: createToolErrorTransform({ tracker: new ToolFailureTracker() }),
+      stopWhen: isStepCount(3),
+    })
+    for await (const _part of result.stream) { /* consume the real tool loop */ }
+    expect(secondPrompt).toContain(`"category":"${category}"`)
+    expect(secondPrompt).toContain(`"retryable":${retryable}`)
+    if (retryAfterMs !== undefined) {
+      expect(secondPrompt).toContain(`"retryAfterMs":${retryAfterMs}`)
+    }
+  })
+
   async function runInvalidToolCall(toolName: string, input: string) {
     let call = 0
     let secondPrompt = ""

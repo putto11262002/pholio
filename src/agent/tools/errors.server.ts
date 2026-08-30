@@ -33,6 +33,17 @@ type FailureCounter = { signature: string; count: number }
 const MAX_CONSECUTIVE_IDENTICAL_FAILURES = 6
 const MAX_ERROR_MESSAGE_LENGTH = 500
 const MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1_000
+const AGENT_TOOL_ERROR_CATEGORIES = new Set([
+  "capacity",
+  "interrupted",
+  "rpc",
+  "protocol",
+  "timeout",
+  "aborted",
+  "exit",
+  "truncated",
+  "invalid_output",
+])
 
 export const EMPTY_FINAL_RESPONSE = "I couldn't produce a complete response. Please try again."
 export const MISSING_STREAM_ERROR = "The response ended unexpectedly. Please try again."
@@ -94,6 +105,14 @@ function retryAfterMs(error: unknown): number | undefined {
     ?? secondsInMs
     ?? (isAgentToolError(error) ? numericProperty(error.details, "retryAfterMs") : undefined)
   return candidate !== undefined && candidate <= MAX_RETRY_AFTER_MS ? candidate : undefined
+}
+
+function agentToolErrorCategory(error: unknown): string | undefined {
+  if (!isAgentToolError(error) || !isRecord(error.details)) return undefined
+  const category = error.details.category
+  return typeof category === "string" && AGENT_TOOL_ERROR_CATEGORIES.has(category)
+    ? category
+    : undefined
 }
 
 function normalizedFailureSignature(failure: Omit<NormalizedToolFailure, "attempt">): string {
@@ -183,7 +202,7 @@ function classifyToolError(error: unknown, toolName: string): Omit<NormalizedToo
   const retryAfter = retryAfterMs(error)
   return {
     phase,
-    category: "execution",
+    category: agentToolErrorCategory(error) ?? "execution",
     retryable: isAgentToolError(error) ? error.mode === "recoverable" : false,
     ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}),
   }

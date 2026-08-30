@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const mocks = vi.hoisted(() => ({
+  createAnalysisTools: vi.fn(() => ({})),
   streamText: vi.fn(),
 }))
 
@@ -20,7 +21,7 @@ vi.mock("@/agent/skills/registry.server", () => ({
   listAgentSkills: vi.fn(async () => []),
 }))
 vi.mock("@/agent/tools/analysis.server", () => ({
-  createAnalysisTools: vi.fn(() => ({})),
+  createAnalysisTools: mocks.createAnalysisTools,
 }))
 vi.mock("@/agent/tools/portfolio.server", () => ({
   createPortfolioTools: vi.fn(() => ({})),
@@ -48,6 +49,7 @@ describe("runChatAgent cancellation", () => {
 
   it("passes the request abort signal to the model and its tools", async () => {
     const controller = new AbortController()
+    const defer = vi.fn()
 
     await runChatAgent({
       messages: [],
@@ -55,6 +57,7 @@ describe("runChatAgent cancellation", () => {
       userId: "user-1",
       threadId: "thread-1",
       abortSignal: controller.signal,
+      defer,
     })
 
     expect(mocks.streamText).toHaveBeenCalledWith(
@@ -62,6 +65,7 @@ describe("runChatAgent cancellation", () => {
         abortSignal: controller.signal,
       })
     )
+    expect(mocks.createAnalysisTools).toHaveBeenCalledWith("user-1", "thread-1", expect.any(Function), defer)
   })
 
   it("makes zero-based step 19 tool-free and adds an explicit conclusion instruction", async () => {
