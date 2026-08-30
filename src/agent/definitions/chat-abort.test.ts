@@ -2,11 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const mocks = vi.hoisted(() => ({
   createAnalysisTools: vi.fn(() => ({})),
+  convertToModelMessages: vi.fn(async (messages) => messages),
   streamText: vi.fn(),
 }))
 
 vi.mock("ai", () => ({
-  convertToModelMessages: vi.fn(async (messages) => messages),
+  convertToModelMessages: mocks.convertToModelMessages,
   InvalidToolInputError: { isInstance: vi.fn(() => false) },
   NoSuchToolError: { isInstance: vi.fn(() => false) },
   isStepCount: vi.fn(() => vi.fn()),
@@ -43,6 +44,7 @@ import { runChatAgent } from "./chat.server"
 
 describe("runChatAgent cancellation", () => {
   beforeEach(() => {
+    mocks.convertToModelMessages.mockClear()
     mocks.streamText.mockReset()
     mocks.streamText.mockReturnValue({ stream: new ReadableStream() })
   })
@@ -66,6 +68,9 @@ describe("runChatAgent cancellation", () => {
       })
     )
     expect(mocks.createAnalysisTools).toHaveBeenCalledWith("user-1", "thread-1", expect.any(Function), defer)
+    expect(mocks.convertToModelMessages).toHaveBeenCalledWith([], {
+      tools: expect.objectContaining({ tool_a: expect.any(Object), tool_b: expect.any(Object) }),
+    })
   })
 
   it("makes zero-based step 19 tool-free and adds an explicit conclusion instruction", async () => {
