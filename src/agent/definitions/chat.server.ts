@@ -10,12 +10,15 @@ import { createPortfolioTools } from "@/agent/tools/portfolio.server"
 import { createResearchTools } from "@/agent/tools/research.server"
 import { skillTools } from "@/agent/tools/skills.server"
 import { stockTools } from "@/agent/tools/stock.server"
-import { stopOnTerminalToolError } from "@/agent/tools/errors.server"
+import { createToolErrorTransform, sanitizeToolErrorMessage, ToolFailureTracker } from "@/agent/tools/errors.server"
 import { buildAiRun, getMonthlyLimitUsd, getMonthlySpend, insertAiRun } from "@/agent/usage/api.server"
 
 const CHAT_TOTAL_TIMEOUT_MS = 90_000
 const CHAT_STEP_TIMEOUT_MS = 45_000
 const CHAT_CHUNK_TIMEOUT_MS = 30_000
+const CHAT_MAX_STEPS = 20
+const CHAT_FINAL_STEP = CHAT_MAX_STEPS - 1
+const FINAL_CONCLUSION_INSTRUCTION = `This is the final permitted model step. Tools are unavailable. Give the user a concise conclusion now using the information already gathered. If the request could not be completed, clearly explain the blocker and what the user can do next.`
 
 const SYSTEM_PROMPT = `You are Pholio's stock analysis assistant for a retail investor holding US stocks.
 
@@ -94,6 +97,16 @@ export async function runChatAgent({
   const skills = await listAgentSkills()
   const researchTools = createResearchTools()
   const startedAt = Date.now()
+  const baseInstructions = renderSystemPrompt(skills)
+  const tools = {
+    ...skillTools,
+    ...createPortfolioTools(userId),
+    ...stockTools,
+    ...researchTools,
+    ...createAnalysisTools(userId),
+  }
+  const toolNames = Object.keys(tools) as Array<keyof typeof tools & string>
+  const failureTracker = new ToolFailureTracker()
 
   const wrappedOnEnd: StreamTextOnEndCallback<ToolSet> = async (event) => {
     console.info(JSON.stringify({
@@ -111,7 +124,7 @@ export async function runChatAgent({
       console.error(JSON.stringify({
         event: "agent.chat.usage_insert_failed",
         threadId,
-        error: err instanceof Error ? err.message : String(err),
+        error: sanitizeToolErrorMessage(err),
       }))
     }
     await onEnd(event)
@@ -119,17 +132,28 @@ export async function runChatAgent({
 
   return streamText({
     model: createModel(modelId),
-    instructions: renderSystemPrompt(skills),
-    tools: {
-      ...skillTools,
-      ...createPortfolioTools(userId),
-      ...stockTools,
-      ...researchTools,
-      ...createAnalysisTools(userId),
+    instructions: baseInstructions,
+    tools,
+    experimental_transform: createToolErrorTransform({ tracker: failureTracker, abortSignal }),
+    prepareStep: ({ stepNumber }) => {
+      const unavailable = failureTracker.unavailableReasons()
+      const unavailableInstruction = unavailable.length > 0
+        ? `The following tools are unavailable for the rest of this turn. Do not call them; use another tool or explain the limitation:\n${unavailable.map((reason) => `- ${reason}`).join("\n")}`
+        : null
+      const finalStep = stepNumber === CHAT_FINAL_STEP
+      return {
+        activeTools: finalStep ? [] : toolNames.filter((toolName) => !failureTracker.isDisabled(toolName)),
+        ...(finalStep ? { toolChoice: "none" as const } : {}),
+        instructions: [baseInstructions, unavailableInstruction, finalStep ? FINAL_CONCLUSION_INSTRUCTION : null]
+          .filter((part): part is string => part !== null)
+          .join("\n\n"),
+      }
     },
     messages: modelMessages,
     abortSignal,
-    stopWhen: [stopOnTerminalToolError, isStepCount(10)],
+    // Provider transport retries remain at the AI SDK default. There are no
+    // application/tool retries or tool-call repair hooks in this loop.
+    stopWhen: isStepCount(CHAT_MAX_STEPS),
     timeout: {
       totalMs: CHAT_TOTAL_TIMEOUT_MS,
       stepMs: CHAT_STEP_TIMEOUT_MS,
@@ -139,7 +163,7 @@ export async function runChatAgent({
       console.error(JSON.stringify({
         event: "agent.chat.error",
         threadId,
-        error: event.error instanceof Error ? event.error.message : String(event.error),
+        error: sanitizeToolErrorMessage(event.error),
       }))
     },
     onAbort: (event) => {
@@ -158,9 +182,10 @@ export async function runChatAgent({
       }))
     },
     onToolExecutionEnd: (event) => {
-      const success = event.toolOutput.type === "tool-result"
-      const output = success ? event.toolOutput.output : undefined
-      const error = success ? undefined : event.toolOutput.error
+      const output = event.toolOutput.type === "tool-result" ? event.toolOutput.output : undefined
+      const businessFailure = typeof output === "object" && output !== null && "success" in output && output.success === false
+      const success = event.toolOutput.type === "tool-result" && !businessFailure
+      const error = event.toolOutput.type === "tool-error" ? event.toolOutput.error : undefined
       const outputJson = output === undefined ? undefined : JSON.stringify(output)
       console.info(JSON.stringify({
         event: "agent.chat.tool_finish",
@@ -170,7 +195,7 @@ export async function runChatAgent({
         success,
         durationMs: event.toolExecutionMs,
         outputBytes: outputJson === undefined ? undefined : new TextEncoder().encode(outputJson).byteLength,
-        error: error === undefined ? undefined : error instanceof Error ? error.message : String(error),
+        error: error === undefined ? undefined : sanitizeToolErrorMessage(error),
       }))
     },
     onStepEnd: (event) => {

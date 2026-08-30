@@ -6,6 +6,7 @@ import { verifyToken } from "@clerk/backend"
 import type { ChatMessage } from "@/agent/chat-message"
 import { runChatAgent } from "@/agent/definitions/chat.server"
 import type { GeneralChatModelKey } from "@/agent/general-chat-models"
+import { MISSING_STREAM_ERROR } from "@/agent/tools/errors.server"
 import { getThreadOwnerUserId } from "@/thread/api.server"
 
 export class ChatAgent extends AIChatAgent<Env> {
@@ -33,6 +34,7 @@ export class ChatAgent extends AIChatAgent<Env> {
       stream: toUIMessageStream({
         stream: result.stream,
         sendReasoning: true,
+        onError: () => MISSING_STREAM_ERROR,
       }),
     })
   }

@@ -13,7 +13,7 @@ import {
   InputGroupTextarea,
 } from "@/components/ui/input-group"
 import { cn } from "@/lib/utils"
-import { toolDisplayRegistry } from "@/agent/tool-display"
+import { isNormalizedToolFailure, toolDisplayRegistry, toolResultMessage } from "@/agent/tool-display"
 import {
   TableBody,
   TableCell,
@@ -446,16 +446,18 @@ function toolPartRow(part: AnyPart) {
   const p = part as { state: string; input?: unknown; output?: unknown; errorText?: string }
   const display = toolDisplayRegistry[toolName]
   const isLoading = p.state === "input-available" || p.state === "input-streaming" || p.state === "output-streaming"
-  const isDone = p.state === "output-available"
-  const isError = p.state === "output-error"
+  const normalizedFailure = p.state === "output-available" && isNormalizedToolFailure(p.output)
+  const isDone = p.state === "output-available" && !normalizedFailure
+  const isError = p.state === "output-error" || normalizedFailure
   const label = display?.label ?? toolName
   const loadingMsg =
     display == null ? `Running ${toolName}…`
     : typeof display.loadingMessage === "function"
     ? display.loadingMessage((p.input ?? {}) as Record<string, unknown>)
     : display.loadingMessage
-  const resultMsg = isDone && display ? display.resultMessage(p.output) : null
-  return { isLoading, isDone, isError, label, loadingMsg, resultMsg, errorText: isError ? (p as { errorText?: string }).errorText : undefined }
+  const resultMsg = p.state === "output-available" ? toolResultMessage(display, p.output) : null
+  const errorText = normalizedFailure ? resultMsg : isError ? (p as { errorText?: string }).errorText : undefined
+  return { isLoading, isDone, isError, label, loadingMsg, resultMsg, errorText }
 }
 
 function RailNode({ children }: { children: React.ReactNode }) {

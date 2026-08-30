@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { createUIMessageStreamResponse, streamText, toUIMessageStream } from "ai"
 import { MockLanguageModelV4, simulateReadableStream } from "ai/test"
+import { MISSING_STREAM_ERROR } from "@/agent/tools/errors.server"
 
 describe("chat reasoning stream", () => {
   it("preserves reasoning and final text in the UI message protocol", async () => {
@@ -42,5 +43,16 @@ describe("chat reasoning stream", () => {
     expect(protocol).toContain('"type":"reasoning-end"')
     expect(protocol).toContain('"delta":"Your largest position is AAPL."')
     expect(usage.outputTokenDetails.reasoningTokens).toBe(7)
+  })
+
+  it("maps a missing model finish to a safe UI-visible error", async () => {
+    const model = new MockLanguageModelV4({
+      doStream: async () => ({ stream: simulateReadableStream({ chunks: [] }) }),
+    })
+    const result = streamText({ model, prompt: "hello" })
+    const response = createUIMessageStreamResponse({
+      stream: toUIMessageStream({ stream: result.stream, onError: () => MISSING_STREAM_ERROR }),
+    })
+    expect(await response.text()).toContain(MISSING_STREAM_ERROR)
   })
 })
